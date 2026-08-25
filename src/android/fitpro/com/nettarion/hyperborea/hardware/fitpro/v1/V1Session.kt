@@ -341,7 +341,12 @@ class V1Session(
 
     internal fun commandToFields(command: DeviceCommand): Map<V1DataField, Float> = when (command) {
         is DeviceCommand.SetResistance -> {
-            mapOf(V1DataField.RESISTANCE to resistance.levelToRaw(command.level).toFloat())
+            // Reads and writes must share a scale. Once the board proves it reports GEAR we
+            // display gear (1..MaxGear), so a resistance command has to set the gear too -
+            // otherwise ERG and simulated-gradient control from Zwift/MyWhoosh would compute
+            // a delta on the gear scale and apply it on the coarser brake scale.
+            if (gearSeen) mapOf(V1DataField.GEAR to command.level.toFloat())
+            else mapOf(V1DataField.RESISTANCE to resistance.levelToRaw(command.level).toFloat())
         }
         is DeviceCommand.SetIncline -> {
             lastSentGrade = roundToStep(command.percent, deviceInfo.inclineStep)
