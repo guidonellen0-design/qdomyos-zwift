@@ -71,6 +71,7 @@ class V1Session(
     private var lastSentGrade = 0f
     private var lastSentSpeed = 0f
     private var lastKeyCode = -1 // for KEY_OBJECT press-edge detection
+    private var lastFanRaw = -1 // edge-triggered FAN_STATE diagnostic
     private val resistance = ResistanceConverter(deviceInfo.maxResistance)
     private val gripHeartRate = GripHeartRateFilter()
 
@@ -379,7 +380,10 @@ class V1Session(
         // non-belt V1 equipment, retain the historical stop-as-pause behavior.
         is DeviceCommand.StopWorkout -> mapOf(V1DataField.WORKOUT_MODE to WorkoutMode.PAUSE.raw)
         is DeviceCommand.CalibrateIncline -> emptyMap()
-        is DeviceCommand.SetFanSpeed -> mapOf(V1DataField.FAN_STATE to command.level.toFloat())
+        is DeviceCommand.SetFanSpeed -> {
+            logger.i(TAG, "SetFanSpeed requested by the app: level=${command.level}")
+            mapOf(V1DataField.FAN_STATE to command.level.toFloat())
+        }
         is DeviceCommand.SetVolume -> mapOf(V1DataField.VOLUME to command.level.toFloat())
         is DeviceCommand.SetGear -> mapOf(V1DataField.GEAR to command.gear.toFloat())
         is DeviceCommand.SetDistanceGoal -> mapOf(V1DataField.DISTANCE_GOAL to command.meters.toFloat())
@@ -904,7 +908,18 @@ class V1Session(
                 V1DataField.STROKES_PER_MINUTE -> accumulator.updateStrokeRate(value.toInt())
                 V1DataField.FIVE_HUNDRED_SPLIT -> accumulator.updateSplitTime(value.toInt())
                 V1DataField.AVG_FIVE_HUNDRED_SPLIT -> accumulator.updateAvgSplitTime(value.toInt())
-                V1DataField.FAN_STATE -> accumulator.updateFanSpeed(value.toInt())
+                V1DataField.FAN_STATE -> {
+                    val raw = value.toInt()
+                    // The console reports fan state as a small enum, and we do not yet know its
+                    // ordering (Off/Low/Med/High/Auto in some order, possibly with a wrap). Log
+                    // every change so a press of the physical fan keys can be read off logcat and
+                    // lined up against what the panel shows. Edge-triggered, so an idle fan is silent.
+                    if (raw != lastFanRaw) {
+                        logger.i(TAG, "FAN_STATE changed: $lastFanRaw -> $raw")
+                        lastFanRaw = raw
+                    }
+                    accumulator.updateFanSpeed(raw)
+                }
                 // KEY_OBJECT is decoded onto DataResponse.keyObject and handled in handleKeyObject(),
                 // so it never reaches this map — this case only keeps the `when` exhaustive.
                 V1DataField.KEY_OBJECT,
