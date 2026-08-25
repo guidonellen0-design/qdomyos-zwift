@@ -1267,6 +1267,20 @@ void nordictrackifitadbbike::changePower(int32_t power) {
 }
 
 bool nordictrackifitadbbike::changeFanSpeed(uint8_t speed) {
+    // The console reports its fan as a 5-state enum - 0 off, 1-3 the three
+    // physical speeds, 4 auto - and wraps 4 back to 0 on its own fan key.
+    // homeform's +/- tiles do unguarded uint8 arithmetic on the current value,
+    // so a "+" at the top arrives here as 4 or 5 and a "-" at 0 arrives as 255.
+    // Fold both onto the three real speeds so the tile cannot be stepped onto a
+    // setting the fan does not have. Auto stays reachable from the console's own
+    // key, and is still displayed when set there - this only bounds what QZ
+    // *writes*.
+    const uint8_t maxFanSpeed = 3;
+    if (speed > 127) {
+        speed = 0; // wrapped-around "-" press at 0
+    } else if (speed > maxFanSpeed) {
+        speed = maxFanSpeed;
+    }
 #ifdef Q_OS_ANDROID
     if (grpcInitialized) {
         setGrpcFanSpeed(static_cast<int>(speed));
