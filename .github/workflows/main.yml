@@ -11,11 +11,9 @@ env:
 # scheduled nightly, or manual workflow dispatch events.
 on:
   workflow_dispatch:
-  push:
-    branches: [ master,  github-workflow-playground ]
-  pull_request:
-  schedule:
-    - cron: "0 0 * * *"
+# Fork-local change: the nightly schedule and the push / pull_request triggers
+# are removed so this fork only builds when a run is started by hand.
+# Upstream keeps all four. Do not include this hunk in a pull request upstream.
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
