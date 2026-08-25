@@ -144,6 +144,12 @@
                                     </intent-filter>
                                 </activity-alias>
 
+                                <receiver android:name=".QzBootReceiver" android:exported="true" android:enabled="true">
+                                    <intent-filter>
+                                        <action android:name="android.intent.action.BOOT_COMPLETED" />
+                                    </intent-filter>
+                                </receiver>
+
                                 <receiver android:name=".MediaButtonReceiver" android:exported="true" android:permission="android.permission.MODIFY_AUDIO_SETTINGS">
                                     <intent-filter>
                                         <action android:name="android.media.VOLUME_CHANGED_ACTION" />
@@ -158,6 +164,7 @@
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
 <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 <uses-permission android:name="android.permission.RECEIVE_MEDIA_BUTTON" />
+<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.ACCESS_CHECKIN_PROPERTIES"/>
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"/>
