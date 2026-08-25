@@ -305,6 +305,14 @@ void nordictrackifitadbbike::processPendingDatagrams() {
         bool nordictrackadbbike_resistance = settings.value(QZSettings::nordictrackadbbike_resistance, QZSettings::default_nordictrackadbbike_resistance).toBool();
         bool nordictrackadbbike_gear_resistance_mode = settings.value(QZSettings::nordictrackadbbike_gear_resistance_mode, QZSettings::default_nordictrackadbbike_gear_resistance_mode).toBool();
 
+        // On the FitPro build update() polls the USB-HID service directly and is the authoritative
+        // source for speed, cadence, resistance, power and incline. This datagram stream carries the
+        // same metrics, so letting both write the shared values makes every reading oscillate between
+        // the two sources. It is worst for resistance, where the gear branch below writes the *gear*
+        // number into Resistance rather than a resistance. When the service is live, keep parsing the
+        // datagram - other code here needs the parsed values - but let update() own the metrics.
+        const bool fitProOwnsMetrics = grpcInitialized;
+
         double speed = 0;
         double cadence = 0;
         double resistance = 0;
@@ -319,13 +327,15 @@ void nordictrackifitadbbike::processPendingDatagrams() {
                 QStringList aValues = line.split(" ");
                 if (aValues.length()) {
                     speed = getDouble(aValues.last());
-                    Speed = speed;
+                    if (!fitProOwnsMetrics)
+                        Speed = speed;
                 }
             } else if (line.contains(QStringLiteral("Changed RPM"))) {
                 QStringList aValues = line.split(" ");
                 if (aValues.length()) {
                     cadence = getDouble(aValues.last());
-                    Cadence = cadence;
+                    if (!fitProOwnsMetrics)
+                        Cadence = cadence;
                 }
             } else if (line.contains(QStringLiteral("Changed CurrentGear"))) {
                 QStringList aValues = line.split(" ");
@@ -342,7 +352,7 @@ void nordictrackifitadbbike::processPendingDatagrams() {
                         }
                         #endif
                         qDebug() << "Gear resistance mode: gear" << gear << "set as resistance via gRPC";
-                    } else if (!nordictrackadbbike_resistance) {
+                    } else if (!nordictrackadbbike_resistance && !fitProOwnsMetrics) {
                         // Standard mode: gears control inclination (existing behavior)
                         Resistance = gear;
                         emit resistanceRead(Resistance.value());
@@ -361,7 +371,7 @@ void nordictrackifitadbbike::processPendingDatagrams() {
                         m_pelotonResistance = bikeResistanceToPeloton(resistance);
                     qDebug() << QStringLiteral("Current Peloton Resistance: ") << m_pelotonResistance.value()
                              << resistance;
-                    if(!gearsAvailable && !nordictrackadbbike_resistance) {
+                    if(!gearsAvailable && !nordictrackadbbike_resistance && !fitProOwnsMetrics) {
                         Resistance = resistance;
                         emit resistanceRead(Resistance.value());
                     }
@@ -370,13 +380,15 @@ void nordictrackifitadbbike::processPendingDatagrams() {
                 QStringList aValues = line.split(" ");
                 if (aValues.length()) {
                     watt = getDouble(aValues.last());
-                    m_watt = watt;
+                    if (!fitProOwnsMetrics)
+                        m_watt = watt;
                 }
             } else if (line.contains(QStringLiteral("Changed Grade"))) {
                 QStringList aValues = line.split(" ");
                 if (aValues.length()) {
                     grade = getDouble(aValues.last());
-                    Inclination = grade;
+                    if (!fitProOwnsMetrics)
+                        Inclination = grade;
                 }
             }
         }
