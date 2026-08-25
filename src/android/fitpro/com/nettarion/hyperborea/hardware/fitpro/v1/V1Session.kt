@@ -120,6 +120,7 @@ class V1Session(
 
     /** Tracks whether the previous poll's response was flagged truncated, so we log only on the edge. */
     private var lastTruncatedSeen: Boolean = false
+    private var loggedPayloadBaseline = false
 
     override suspend fun start() {
         if (_sessionState.value is SessionState.Streaming || _sessionState.value is SessionState.Connecting) return
@@ -833,12 +834,25 @@ class V1Session(
                 logger.w(
                     TAG,
                     "DataResponse payload size doesn't match the requested ${pollFields.size}-field shape " +
-                        "(requested=[${pollFields.sortedBy { it.fieldIndex }.joinToString { it.name }}], " +
+                        "(expected ${pollFields.sumOf { it.sizeBytes }}B of field data, " +
+                        "raw packet ${firstPacket.size}B; " +
+                        "requested=[${pollFields.sortedBy { it.fieldIndex }.joinToString { it.name }}], " +
                         "decoded ${decoded.fields.size}=[${decoded.fields.keys.joinToString { it.name }}], " +
                         "supportedBitFields=${supportedBitFields.sorted()}) — later field offsets may be unreliable.",
                 )
             } else if (!decoded.isTruncated && lastTruncatedSeen) {
                 logger.i(TAG, "DataResponse payload size now matches the requested field shape again.")
+            }
+            // Baseline for the read budget: log the size relationship once per session even when
+            // the shape matches, so a good poll and a truncated one can be compared directly.
+            if (!loggedPayloadBaseline) {
+                loggedPayloadBaseline = true
+                logger.i(
+                    TAG,
+                    "Poll size baseline: ${pollFields.size} fields, " +
+                        "${pollFields.sumOf { it.sizeBytes }}B of field data requested, " +
+                        "raw packet ${firstPacket.size}B, truncated=${decoded.isTruncated}",
+                )
             }
             lastTruncatedSeen = decoded.isTruncated
 
