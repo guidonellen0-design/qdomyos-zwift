@@ -27,6 +27,7 @@ data class ExerciseData(
     val strokeRate: Int? = null,
     val splitTime: Int? = null,
     val avgSplitTime: Int? = null,
+    val fanSpeed: Int? = null,
 ) {
     companion object {
         /**

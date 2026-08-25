@@ -31,6 +31,7 @@ class ExerciseDataAccumulator(
     private var strokeRate: Int? = null
     private var splitTime: Int? = null
     private var avgSplitTime: Int? = null
+    private var fanSpeed: Int? = null
 
     // Elapsed time tracking — own clock, pausable
     private var accumulatedSeconds: Long = initialElapsedSeconds
@@ -90,6 +91,7 @@ class ExerciseDataAccumulator(
     fun updateStrokeRate(value: Int) { strokeRate = value }
     fun updateSplitTime(value: Int) { splitTime = value }
     fun updateAvgSplitTime(value: Int) { avgSplitTime = value }
+    fun updateFanSpeed(value: Int) { fanSpeed = value }
 
     private fun elapsedSeconds(): Long {
         val running = if (runningStartTime > 0L) (clock() - runningStartTime) / 1000L else 0L
@@ -123,6 +125,7 @@ class ExerciseDataAccumulator(
         strokeRate = strokeRate,
         splitTime = splitTime,
         avgSplitTime = avgSplitTime,
+        fanSpeed = fanSpeed,
     )
 
     fun reset() {
@@ -154,5 +157,6 @@ class ExerciseDataAccumulator(
         strokeRate = null
         splitTime = null
         avgSplitTime = null
+        fanSpeed = null
     }
 }

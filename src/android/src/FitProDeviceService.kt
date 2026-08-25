@@ -207,7 +207,7 @@ object FitProDeviceService {
     /** QZ-side hook: the user-configured real resistance-level count for this machine (0 = unset). */
     @JvmStatic fun setMaxResistance(max: Int) { qzMaxResistance = max }
     @JvmStatic fun getCurrentHeartRate(): Double = (latest.heartRate ?: 0).toDouble()
-    @JvmStatic fun getCurrentFanSpeed(): Int = 0
+    @JvmStatic fun getCurrentFanSpeed(): Int = latest.fanSpeed ?: 0
     @JvmStatic fun getCurrentStrokesCount(): Double = (latest.strokeCount ?: 0).toDouble()
     @JvmStatic fun getCurrentStrokesLength(): Double = 0.0
     @JvmStatic fun getCurrentPaceSeconds(): Int = latest.splitTime ?: 0

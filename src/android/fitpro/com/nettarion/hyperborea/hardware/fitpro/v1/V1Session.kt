@@ -904,6 +904,7 @@ class V1Session(
                 V1DataField.STROKES_PER_MINUTE -> accumulator.updateStrokeRate(value.toInt())
                 V1DataField.FIVE_HUNDRED_SPLIT -> accumulator.updateSplitTime(value.toInt())
                 V1DataField.AVG_FIVE_HUNDRED_SPLIT -> accumulator.updateAvgSplitTime(value.toInt())
+                V1DataField.FAN_STATE -> accumulator.updateFanSpeed(value.toInt())
                 // KEY_OBJECT is decoded onto DataResponse.keyObject and handled in handleKeyObject(),
                 // so it never reaches this map — this case only keeps the `when` exhaustive.
                 V1DataField.KEY_OBJECT,
@@ -912,7 +913,6 @@ class V1Session(
                 V1DataField.CALORIES,
                 V1DataField.MAX_RESISTANCE_LEVEL,
                 V1DataField.WATT_GOAL,
-                V1DataField.FAN_STATE,
                 V1DataField.IDLE_MODE_LOCKOUT,
                 V1DataField.REQUIRE_START_REQUESTED,
                 V1DataField.VOLUME,
