@@ -73,6 +73,8 @@ class V1Session(
     private var lastKeyCode = -1 // for KEY_OBJECT press-edge detection
     private var lastFanRaw = -1 // edge-triggered FAN_STATE diagnostic
     private val resistance = ResistanceConverter(deviceInfo.maxResistance)
+    private var gearSeen = false // GEAR is authoritative once the board proves it reports it
+    private var lastBrakeLevel = -1 // RESISTANCE field, kept for diagnostics only
     private val gripHeartRate = GripHeartRateFilter()
 
     /** Device capabilities read from MCU during handshake. */
@@ -846,7 +848,7 @@ class V1Session(
                 lastLogTimeMs = now
                 val snap = _exerciseData.value
                 if (snap != null) {
-                    logger.d(TAG, "power=${snap.power}W cadence=${snap.cadence}rpm speed=${snap.speed}kph resistance=${snap.resistance} incline=${snap.incline}%")
+                    logger.d(TAG, "power=${snap.power}W cadence=${snap.cadence}rpm speed=${snap.speed}kph resistance=${snap.resistance} brake=$lastBrakeLevel gear=$gearSeen incline=${snap.incline}%")
                 }
             }
         }
@@ -869,7 +871,29 @@ class V1Session(
                 // surface it as a target — no meaningless blue speed arrow on a bike.
                 V1DataField.ACTUAL_KPH -> if (!detectedDeviceType.isBeltBased) accumulator.updateSpeed(value)
                 V1DataField.KPH -> if (detectedDeviceType.isBeltBased) accumulator.updateSpeed(value)
-                V1DataField.RESISTANCE -> accumulator.updateResistance(resistance.rawToLevel(value.toInt()))
+                // The console's +/- buttons are GearUp/GearDown and drive GEAR (1..24 here,
+                // MaxGear from the board). GEAR is the number printed on the console, and it
+                // moves by exactly one per press. Field RESISTANCE is a separate, coarser
+                // internal brake level (0..14 measured on the S22i) that the console never
+                // displays, so driving the UI from it dropped roughly nine of every
+                // twenty-four presses and looked like a button needing two taps.
+                // Fall back to RESISTANCE until the board actually reports a gear, so a
+                // console without one behaves exactly as before.
+                V1DataField.GEAR -> {
+                    val gear = value.toInt()
+                    if (gear > 0) {
+                        if (!gearSeen) {
+                            gearSeen = true
+                            logger.i(TAG, "GEAR reported by board (=$gear); driving resistance from gear, "
+                                + "brake level field was $lastBrakeLevel")
+                        }
+                        accumulator.updateResistance(gear)
+                    }
+                }
+                V1DataField.RESISTANCE -> {
+                    lastBrakeLevel = resistance.rawToLevel(value.toInt())
+                    if (!gearSeen) accumulator.updateResistance(lastBrakeLevel)
+                }
                 V1DataField.ACTUAL_INCLINE -> accumulator.updateIncline(value)
                 V1DataField.GRADE -> accumulator.updateTargetIncline(value)
                 // Grip HR is a noisy analog contact reading — gate + smooth it, and clear (null) on

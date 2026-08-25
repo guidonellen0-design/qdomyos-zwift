@@ -220,7 +220,7 @@ enum class V1DataField(val fieldIndex: Int, val sizeBytes: Int, val converter: V
             WATTS, RPM, PULSE, ACTUAL_KPH, ACTUAL_INCLINE, KPH,
             // Session tracking
             CURRENT_DISTANCE, CURRENT_CALORIES, CURRENT_TIME,
-            GRADE, RESISTANCE, WORKOUT_MODE,
+            GRADE, RESISTANCE, GEAR, WORKOUT_MODE,
             LAP_TIME, AVERAGE_GRADE, AVERAGE_WATTS,
             VERTICAL_METER_NET, VERTICAL_METER_GAIN,
             START_REQUESTED, RECOVERABLE_PAUSED_TIME,
