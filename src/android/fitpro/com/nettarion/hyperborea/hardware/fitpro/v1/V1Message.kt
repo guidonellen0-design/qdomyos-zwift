@@ -224,9 +224,14 @@ enum class V1DataField(val fieldIndex: Int, val sizeBytes: Int, val converter: V
             LAP_TIME, AVERAGE_GRADE, AVERAGE_WATTS,
             VERTICAL_METER_NET, VERTICAL_METER_GAIN,
             START_REQUESTED, RECOVERABLE_PAUSED_TIME,
-            // Config/target readback
-            WATT_GOAL, FAN_STATE, IS_CONSTANT_WATTS_MODE,
-            IS_READY_TO_DISCONNECT,
+            // Config/target readback.
+            // WATT_GOAL (2B), IS_CONSTANT_WATTS_MODE (1B) and IS_READY_TO_DISCONNECT
+            // (1B) are deliberately NOT polled. The console truncates any
+            // DataResponse over 55 bytes; with GEAR added the 24-field shape came to
+            // 56 and the tail decoded as garbage. Dropping these three buys 4 bytes
+            // and puts the poll at 21 fields / 52 bytes. GEAR is worth far more than
+            // three values QZ itself writes and never needs read back.
+            FAN_STATE,
             // Rower data
             STROKES, STROKES_PER_MINUTE,
             FIVE_HUNDRED_SPLIT, AVG_FIVE_HUNDRED_SPLIT,
