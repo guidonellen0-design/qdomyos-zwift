@@ -192,21 +192,39 @@ enum class V1DataField(val fieldIndex: Int, val sizeBytes: Int, val converter: V
         private val byFieldIndex = entries.associateBy { it.fieldIndex }
         fun fromFieldIndex(index: Int): V1DataField? = byFieldIndex[index]
 
-        /** Fields read each iteration of the polling loop, plus KEY_OBJECT. */
+        /**
+         * Fields read each iteration of the polling loop.
+         *
+         * Deliberately small. A DataResponse carries a fixed-size payload, and at least
+         * one controller (NordicTrack S22i, MalataMediatekArgon2) stops at ~58 bytes:
+         * ask for more and the surplus fields are silently dropped off the end, with
+         * `isTruncated` the only signal. The 30-field list this replaced came to 80
+         * bytes on that console and lost its last ten fields -- FAN_STATE among them,
+         * which is why the fan always read 0 there.
+         *
+         * This list is 55 bytes / 23 fields on a bike, once computePollFields() drops
+         * the rower entries the capability bitmask doesn't claim.
+         *
+         * Removed relative to the previous list, and why:
+         *   KEY_OBJECT (14 bytes) -- console keypad state. Decoded onto
+         *       consoleKeyPresses, which is diagnostic plumbing only; the MCU acts on
+         *       every key itself and the result arrives through normal polling, so
+         *       nothing downstream drives off it. Costs a quarter of the budget.
+         *   GOAL_TIME (4) -- static per-workout config, set before the ride starts.
+         *   WARMUP_TIMEOUT (2), COOLDOWN_TIMEOUT (2), VOLUME (1), GEAR (1),
+         *   SYSTEM_UNITS (1) -- all fall into applyDataResponse's discard branch;
+         *       they were read ten times a second and thrown away.
+         */
         val periodicReadFields: Set<V1DataField> = setOf(
             // Sensor data
-            WATTS, RPM, PULSE, ACTUAL_KPH, ACTUAL_INCLINE,
+            WATTS, RPM, PULSE, ACTUAL_KPH, ACTUAL_INCLINE, KPH,
             // Session tracking
             CURRENT_DISTANCE, CURRENT_CALORIES, CURRENT_TIME,
             GRADE, RESISTANCE, WORKOUT_MODE,
             LAP_TIME, AVERAGE_GRADE, AVERAGE_WATTS,
             VERTICAL_METER_NET, VERTICAL_METER_GAIN,
             START_REQUESTED, RECOVERABLE_PAUSED_TIME,
-            // Safety key state (14 bytes, not processed)
-            KEY_OBJECT,
             // Config/target readback
-            KPH, VOLUME, GEAR, GOAL_TIME,
-            SYSTEM_UNITS, WARMUP_TIMEOUT, COOLDOWN_TIMEOUT,
             WATT_GOAL, FAN_STATE, IS_CONSTANT_WATTS_MODE,
             IS_READY_TO_DISCONNECT,
             // Rower data
