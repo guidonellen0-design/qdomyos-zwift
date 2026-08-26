@@ -29,6 +29,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
@@ -54,6 +55,16 @@ object FitProDeviceService {
     private val PRODUCT_IDS = setOf(PRODUCT_ID_V1, PRODUCT_ID_V2, PRODUCT_ID_V2_FTDI)
 
     private const val ACTION_USB_PERMISSION = "org.cagnulen.qdomyoszwift.FITPRO_USB_PERMISSION"
+
+    // Connecting is retried rather than attempted once: on a vendor console the OEM app owns the
+    // USB interface at boot and QZ may well arrive while that stack is still settling. A single
+    // attempt in that window leaves QZ sitting on zeros forever with no way back short of a
+    // restart by hand. The loop stops as soon as a session streams, so it never fights an
+    // established connection.
+    private const val RETRY_DELAY_MS = 5_000L
+    // A user who declines the permission dialog should not be asked again every few seconds.
+    private const val RETRY_DELAY_AFTER_DENIAL_MS = 60_000L
+    private const val MAX_PERMISSION_PROMPTS = 3
 
     // QZ workout states, mirroring the gRPC WorkoutState the C++ layer expects.
     private const val STATE_IDLE = 1
@@ -85,6 +96,10 @@ object FitProDeviceService {
     @Volatile private var sourceMaxResistance: Int = 0
     @Volatile private var qzMaxResistance: Int = 0
     private var collectJob: Job? = null
+    private var connectJob: Job? = null
+    @Volatile private var connecting = false
+    @Volatile private var permissionPrompts = 0
+    @Volatile private var permissionDeclined = false
 
     // Workout-state machine, fed from the polled WORKOUT_MODE field.
     @Volatile private var currentWorkoutState = STATE_IDLE
@@ -109,20 +124,39 @@ object FitProDeviceService {
             QLog.i(TAG, "initialize() ignored — session already active")
             return
         }
-        scope.launch { connect() }
+        if (connectJob?.isActive == true) {
+            QLog.i(TAG, "initialize() ignored — a connect attempt is already running")
+            return
+        }
+        connecting = true
+        permissionPrompts = 0
+        permissionDeclined = false
+        connectJob = scope.launch {
+            var attempt = 0
+            while (connecting && !connected) {
+                attempt++
+                if (connect()) break
+                if (!connecting) break
+                val wait = if (permissionDeclined) RETRY_DELAY_AFTER_DENIAL_MS else RETRY_DELAY_MS
+                QLog.i(TAG, "FitPro connect attempt $attempt failed, retrying in ${wait / 1000}s")
+                delay(wait)
+            }
+            connecting = false
+        }
     }
 
-    private suspend fun connect() {
+    /** @return true once a session is streaming; false if this attempt should be retried. */
+    private suspend fun connect(): Boolean {
         val ctx = staticContext
         if (ctx == null) {
             QLog.e(TAG, "Context not set. Call setContext() first.")
-            return
+            return false
         }
         try {
             val opened = openUsb(ctx)
             if (opened == null) {
                 QLog.e(TAG, "FitPro USB device not found / permission denied")
-                return
+                return false
             }
             val (transport, productId) = opened
             val info = DeviceDatabase.fromProductId(productId) ?: DeviceDatabase.fallback()
@@ -140,11 +174,13 @@ object FitProDeviceService {
             if (st !is SessionState.Streaming) {
                 val msg = (st as? SessionState.Error)?.message ?: "handshake did not complete"
                 QLog.e(TAG, "FitPro session failed to start: $msg")
-                return
+                return false
             }
 
             session = newSession
             connected = true
+            permissionPrompts = 0
+            permissionDeclined = false
             QLog.i(TAG, "FitPro session streaming (protocol=${if (protocolIsV1) "V1" else "V2"})")
 
             collectJob = scope.launch {
@@ -155,9 +191,11 @@ object FitProDeviceService {
                     }
                 }
             }
+            return true
         } catch (e: Exception) {
             QLog.e(TAG, "FitPro connect failed", e)
             connected = false
+            return false
         }
     }
 
@@ -166,6 +204,9 @@ object FitProDeviceService {
         val s = session
         session = null
         connected = false
+        connecting = false
+        connectJob?.cancel()
+        connectJob = null
         collectJob?.cancel()
         collectJob = null
         scope.launch {
@@ -323,12 +364,22 @@ object FitProDeviceService {
         }
 
         if (!usbManager.hasPermission(device)) {
-            QLog.i(TAG, "Requesting USB permission for ${device.deviceName}")
+            // Retrying must not turn into a dialog every few seconds. After a few refusals we keep
+            // looping but stop asking, so a permission granted later still gets picked up.
+            if (permissionPrompts >= MAX_PERMISSION_PROMPTS) {
+                QLog.w(TAG, "USB permission not granted after $permissionPrompts prompts; waiting instead of asking again")
+                permissionDeclined = true
+                return null
+            }
+            permissionPrompts++
+            QLog.i(TAG, "Requesting USB permission for ${device.deviceName} (prompt $permissionPrompts)")
             if (!requestUsbPermission(ctx, usbManager, device)) {
                 QLog.e(TAG, "USB permission denied for ${device.deviceName}")
+                permissionDeclined = true
                 return null
             }
         }
+        permissionDeclined = false
 
         val usbInterface: UsbInterface = device.getInterface(0)
         var inEndpoint: UsbEndpoint? = null
