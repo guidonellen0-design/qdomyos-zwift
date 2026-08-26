@@ -110,6 +110,7 @@ class nordictrackifitadbbike : public bike {
 
     uint8_t sec1Update = 0;
     QDateTime lastRefreshCharacteristicChanged = QDateTime::currentDateTime();
+    double crankEventTimeRemainder = 0.0; // sub-tick carry for LastCrankEventTime
     QDateTime lastInclinationChanged = QDateTime::currentDateTime();
     QDateTime lastGrpcInclinationChanged = QDateTime::currentDateTime();
     QDateTime lastResistanceChanged = QDateTime::currentDateTime();

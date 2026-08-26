@@ -535,8 +535,21 @@ void nordictrackifitadbbike::processPendingDatagrams() {
                      ((double)lastRefreshCharacteristicChanged.msecsTo(now)));
 
         if (Cadence.value() > 0) {
-            CrankRevs++;
-            LastCrankEventTime += (uint16_t)(1024.0 / (((double)(Cadence.value())) / 60.0));
+            // Accumulate crank revolutions and the crank event clock over the
+            // real elapsed time, the same way KCal and Distance do above.
+            // Incrementing once per update inflated both fields by the update
+            // rate (~21x here), which made the 16-bit event timestamp wrap
+            // every ~3s instead of every 64s and frequently run backwards, so
+            // consumers deriving cadence from the deltas saw 0 rpm most of the
+            // time with brief flashes of the true value.
+            double deltaMs = (double)lastRefreshCharacteristicChanged.msecsTo(now);
+            if (deltaMs > 0) {
+                CrankRevs += (((double)Cadence.value()) / 60.0) * (deltaMs / 1000.0);
+                double ticks = deltaMs * 1.024 + crankEventTimeRemainder;
+                uint32_t wholeTicks = (uint32_t)ticks;
+                crankEventTimeRemainder = ticks - (double)wholeTicks;
+                LastCrankEventTime += (uint16_t)wholeTicks; // wraps at 64s, per spec
+            }
         }
 
         lastRefreshCharacteristicChanged = now;
@@ -845,8 +858,21 @@ void nordictrackifitadbbike::update() {
         Distance += ((Speed.value() / 3600000.0) * ((double)lastRefreshCharacteristicChanged.msecsTo(now)));
 
         if (Cadence.value() > 0) {
-            CrankRevs++;
-            LastCrankEventTime += (uint16_t)(1024.0 / (((double)(Cadence.value())) / 60.0));
+            // Accumulate crank revolutions and the crank event clock over the
+            // real elapsed time, the same way KCal and Distance do above.
+            // Incrementing once per update inflated both fields by the update
+            // rate (~21x here), which made the 16-bit event timestamp wrap
+            // every ~3s instead of every 64s and frequently run backwards, so
+            // consumers deriving cadence from the deltas saw 0 rpm most of the
+            // time with brief flashes of the true value.
+            double deltaMs = (double)lastRefreshCharacteristicChanged.msecsTo(now);
+            if (deltaMs > 0) {
+                CrankRevs += (((double)Cadence.value()) / 60.0) * (deltaMs / 1000.0);
+                double ticks = deltaMs * 1.024 + crankEventTimeRemainder;
+                uint32_t wholeTicks = (uint32_t)ticks;
+                crankEventTimeRemainder = ticks - (double)wholeTicks;
+                LastCrankEventTime += (uint16_t)wholeTicks; // wraps at 64s, per spec
+            }
         }
 
         lastRefreshCharacteristicChanged = now;
