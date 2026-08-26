@@ -2347,6 +2347,60 @@ jobs:
             unzip -l "$APK" "lib/$ABI/libQt5Core_$ABI.so"
           done
 
+      - name: Prepare Android signing key
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          SIGNING_ALIAS: ${{ secrets.ALIAS }}
+          KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -z "$SIGNING_KEY" ] || [ -z "$SIGNING_ALIAS" ] || [ -z "$KEY_STORE_PASSWORD" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "Android signing secrets are not available; APK re-signing will be skipped."
+            echo "CI_ANDROID_RESIGN_APK=false" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          KEYSTORE="${{ github.workspace }}/src/android/ci-signing-key.p12"
+          if ! printf '%s' "$SIGNING_KEY" | base64 --decode > "$KEYSTORE"; then
+            echo "Failed to decode Android signing key."
+            rm -f "$KEYSTORE"
+            exit 1
+          fi
+
+          if [ ! -s "$KEYSTORE" ]; then
+            echo "Decoded Android signing key is empty."
+            rm -f "$KEYSTORE"
+            exit 1
+          fi
+
+          echo "CI_ANDROID_SIGNING_KEYSTORE=$KEYSTORE" >> "$GITHUB_ENV"
+          echo "CI_ANDROID_RESIGN_APK=true" >> "$GITHUB_ENV"
+
+      - name: Re-sign fitpro APK with the fixed debug key
+        run: |
+          if [ "$CI_ANDROID_RESIGN_APK" != "true" ]; then
+            echo "Skipping APK re-signing because Android signing secrets are not available."
+            exit 0
+          fi
+
+          APK_PATH="${{ github.workspace }}/output/android/build/outputs/apk/debug/android-debug-fitpro-${{ matrix.variant.name }}.apk"
+          SIGNED_APK_PATH="${{ github.workspace }}/output/android/build/outputs/apk/debug/android-debug-fitpro-${{ matrix.variant.name }}-signed.apk"
+          trap 'rm -f "$CI_ANDROID_SIGNING_KEYSTORE" "$SIGNED_APK_PATH"' EXIT
+          APKSIGNER=$(find /usr/local/lib/android/sdk/build-tools -name apksigner | sort | tail -n 1)
+          if [ -z "$APKSIGNER" ]; then
+            echo "apksigner not found"
+            exit 1
+          fi
+          "$APKSIGNER" sign \
+            --ks "$CI_ANDROID_SIGNING_KEYSTORE" \
+            --ks-key-alias "${{ secrets.ALIAS }}" \
+            --ks-pass "pass:${{ secrets.KEY_STORE_PASSWORD }}" \
+            --key-pass "pass:${{ secrets.KEY_PASSWORD }}" \
+            --out "$SIGNED_APK_PATH" \
+            "$APK_PATH"
+          mv "$SIGNED_APK_PATH" "$APK_PATH"
+          "$APKSIGNER" verify --print-certs "$APK_PATH"
+
       - name: Archive fitpro binary
         uses: actions/upload-artifact@v4
         with:
