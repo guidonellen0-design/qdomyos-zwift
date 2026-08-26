@@ -112,6 +112,11 @@ object FitProDeviceService {
     @JvmStatic
     fun setContext(context: Context) {
         staticContext = context.applicationContext
+        // Diagnostic only: reports whether this console's radio can advertise at all. Qt's
+        // peripheral backend does not surface the AdvertiseCallback result, so a radio that
+        // silently refuses to advertise is indistinguishable from a working virtual bike that
+        // nothing happens to be scanning for.
+        try { BleCapabilityProbe.run(context) } catch (e: Throwable) { QLog.w(TAG, "BLE probe: ${e.message}") }
     }
 
     @JvmStatic
