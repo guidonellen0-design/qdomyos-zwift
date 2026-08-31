@@ -12,6 +12,7 @@ import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.os.Build
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import com.nettarion.hyperborea.core.AppLogger
 import com.nettarion.hyperborea.core.model.DeviceCommand
@@ -69,6 +70,15 @@ object FitProDeviceService {
     // sits unnoticed for up to a minute.
     private const val RETRY_DELAY_AFTER_DENIAL_MS = 60_000L
     private const val MAX_PERMISSION_PROMPTS = 3
+
+    // On a cold boot Android may start QZ the instant the console's board is enumerated (a
+    // persisted "use by default" launches the USB activity with permission pre-granted). Claiming
+    // that early is losing: the OEM wolf service claims later with force=true, steals the
+    // interface, and this side freezes silently because the retry loop stopped at connected.
+    // Holding the first claim past the boot window keeps QZ the *last* claimant no matter who
+    // started it. Off-boot (manual launch, app restart) elapsedRealtime is far past the window,
+    // so the holdoff costs nothing there.
+    private const val BOOT_CLAIM_HOLDOFF_MS = 90_000L
 
     // QZ workout states, mirroring the gRPC WorkoutState the C++ layer expects.
     private const val STATE_IDLE = 1
@@ -141,6 +151,12 @@ object FitProDeviceService {
         permissionPrompts = 0
         permissionDeclined = false
         connectJob = scope.launch {
+            val sinceBoot = SystemClock.elapsedRealtime()
+            if (sinceBoot < BOOT_CLAIM_HOLDOFF_MS) {
+                val holdoff = BOOT_CLAIM_HOLDOFF_MS - sinceBoot
+                QLog.i(TAG, "Boot claim holdoff: waiting ${holdoff / 1000}s so the OEM stack claims the interface first")
+                delay(holdoff)
+            }
             var attempt = 0
             while (connecting && !connected) {
                 attempt++

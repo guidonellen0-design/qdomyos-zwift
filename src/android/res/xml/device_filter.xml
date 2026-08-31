@@ -26,8 +26,8 @@
     <usb-device vendor-id="6790" product-id="29987" /> <!-- 0x7523: CH340 -->
 
     <!-- Concept2 PM3,PM4 -->
-    <usb-device vendor-id="17A4" product-id="0002" />
-    <usb-device vendor-id="17A4" product-id="0001" />
+    <usb-device vendor-id="0x17A4" product-id="0002" />
+    <usb-device vendor-id="0x17A4" product-id="0001" />
 
     <!-- CDC driver -->
     <usb-device vendor-id="9025" />                   <!-- 0x2341 / ......: Arduino -->
