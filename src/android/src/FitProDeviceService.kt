@@ -63,6 +63,10 @@ object FitProDeviceService {
     // established connection.
     private const val RETRY_DELAY_MS = 5_000L
     // A user who declines the permission dialog should not be asked again every few seconds.
+    // This delay only spaces out actual dialogs; once MAX_PERMISSION_PROMPTS is exhausted the
+    // retries are silent hasPermission() checks and run at RETRY_DELAY_MS again — otherwise a
+    // grant that lands between checks (e.g. the user taps a dialog the system already dismissed)
+    // sits unnoticed for up to a minute.
     private const val RETRY_DELAY_AFTER_DENIAL_MS = 60_000L
     private const val MAX_PERMISSION_PROMPTS = 3
 
@@ -142,7 +146,8 @@ object FitProDeviceService {
                 attempt++
                 if (connect()) break
                 if (!connecting) break
-                val wait = if (permissionDeclined) RETRY_DELAY_AFTER_DENIAL_MS else RETRY_DELAY_MS
+                val promptable = permissionPrompts < MAX_PERMISSION_PROMPTS
+                val wait = if (permissionDeclined && promptable) RETRY_DELAY_AFTER_DENIAL_MS else RETRY_DELAY_MS
                 QLog.i(TAG, "FitPro connect attempt $attempt failed, retrying in ${wait / 1000}s")
                 delay(wait)
             }
