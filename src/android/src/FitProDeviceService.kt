@@ -12,7 +12,6 @@ import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.os.Build
-import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import com.nettarion.hyperborea.core.AppLogger
 import com.nettarion.hyperborea.core.model.DeviceCommand
@@ -71,14 +70,15 @@ object FitProDeviceService {
     private const val RETRY_DELAY_AFTER_DENIAL_MS = 60_000L
     private const val MAX_PERMISSION_PROMPTS = 3
 
-    // On a cold boot Android may start QZ the instant the console's board is enumerated (a
-    // persisted "use by default" launches the USB activity with permission pre-granted). Claiming
-    // that early is losing: the OEM wolf service claims later with force=true, steals the
-    // interface, and this side freezes silently because the retry loop stopped at connected.
-    // Holding the first claim past the boot window keeps QZ the *last* claimant no matter who
-    // started it. Off-boot (manual launch, app restart) elapsedRealtime is far past the window,
-    // so the holdoff costs nothing there.
-    private const val BOOT_CLAIM_HOLDOFF_MS = 90_000L
+    /** PendingIntent.FLAG_MUTABLE — inlined so this compiles against pre-31 SDKs. */
+    private const val FLAG_MUTABLE = 0x02000000
+
+    // Losing the interface to the OEM stack is no longer handled by waiting the boot window out
+    // before the first claim — that cost every start-up a minute and a half and still lost the
+    // race whenever the OEM app claimed late. The session watchdog reclaims instead, so QZ can
+    // connect as early as it likes. This is only the pause between teardown and reclaim, long
+    // enough for the other side to finish its own claim rather than trading it back immediately.
+    private const val RECONNECT_SETTLE_MS = 3_000L
 
     // QZ workout states, mirroring the gRPC WorkoutState the C++ layer expects.
     private const val STATE_IDLE = 1
@@ -111,6 +111,9 @@ object FitProDeviceService {
     @Volatile private var qzMaxResistance: Int = 0
     private var collectJob: Job? = null
     private var connectJob: Job? = null
+    private var watchdogJob: Job? = null
+    private var recoverJob: Job? = null
+    @Volatile private var recovering = false
     @Volatile private var connecting = false
     @Volatile private var permissionPrompts = 0
     @Volatile private var permissionDeclined = false
@@ -151,12 +154,6 @@ object FitProDeviceService {
         permissionPrompts = 0
         permissionDeclined = false
         connectJob = scope.launch {
-            val sinceBoot = SystemClock.elapsedRealtime()
-            if (sinceBoot < BOOT_CLAIM_HOLDOFF_MS) {
-                val holdoff = BOOT_CLAIM_HOLDOFF_MS - sinceBoot
-                QLog.i(TAG, "Boot claim holdoff: waiting ${holdoff / 1000}s so the OEM stack claims the interface first")
-                delay(holdoff)
-            }
             var attempt = 0
             while (connecting && !connected) {
                 attempt++
@@ -218,11 +215,48 @@ object FitProDeviceService {
                     }
                 }
             }
+
+            // Whoever claims the USB interface last owns it, and the OEM app claims with
+            // force=true — so QZ can be streaming one second and holding a dead handle the next,
+            // typically when the attract screen brings that app to the front. Watching the session
+            // state turns that into a recoverable event instead of a permanent freeze the user can
+            // only clear by restarting QZ by hand.
+            watchdogJob = scope.launch {
+                newSession.sessionState.collect { st ->
+                    if (st is SessionState.Error || st is SessionState.Disconnected) {
+                        recoverSession((st as? SessionState.Error)?.message ?: "disconnected")
+                    }
+                }
+            }
             return true
         } catch (e: Exception) {
             QLog.e(TAG, "FitPro connect failed", e)
             connected = false
             return false
+        }
+    }
+
+    /**
+     * Tear the current session down and connect again from scratch. Runs detached from the
+     * watchdog that triggers it, since part of the teardown is cancelling that watchdog.
+     */
+    private fun recoverSession(reason: String) {
+        if (recovering || !connected) return
+        recovering = true
+        QLog.w(TAG, "FitPro session lost ($reason) — tearing down and reconnecting")
+        recoverJob = scope.launch {
+            val s = session
+            session = null
+            connected = false
+            collectJob?.cancel()
+            collectJob = null
+            watchdogJob?.cancel()
+            watchdogJob = null
+            try { s?.stop() } catch (e: Exception) { QLog.w(TAG, "stop error during recovery: ${e.message}") }
+            latest = ExerciseData.ZERO
+            delay(RECONNECT_SETTLE_MS)
+            recovering = false
+            initialize("")
         }
     }
 
@@ -236,6 +270,13 @@ object FitProDeviceService {
         connectJob = null
         collectJob?.cancel()
         collectJob = null
+        watchdogJob?.cancel()
+        watchdogJob = null
+        // Cancel any in-flight recovery too, or a shutdown racing one would be undone by the
+        // reconnect that recovery schedules after its settle delay.
+        recoverJob?.cancel()
+        recoverJob = null
+        recovering = false
         scope.launch {
             try { s?.stop() } catch (e: Exception) { QLog.w(TAG, "stop error: ${e.message}") }
         }
@@ -400,10 +441,17 @@ object FitProDeviceService {
             }
             permissionPrompts++
             QLog.i(TAG, "Requesting USB permission for ${device.deviceName} (prompt $permissionPrompts)")
-            if (!requestUsbPermission(ctx, usbManager, device)) {
+            val reported = requestUsbPermission(ctx, usbManager, device)
+            // hasPermission() is the authority, not the broadcast extra: the extra has been seen
+            // to read false on a grant the system had in fact recorded, and believing it cost the
+            // user a full RETRY_DELAY_AFTER_DENIAL_MS wait right after they tapped Allow.
+            if (!reported && !usbManager.hasPermission(device)) {
                 QLog.e(TAG, "USB permission denied for ${device.deviceName}")
                 permissionDeclined = true
                 return null
+            }
+            if (!reported) {
+                QLog.w(TAG, "USB permission broadcast said denied but the grant is recorded — continuing")
             }
         }
         permissionDeclined = false
@@ -443,7 +491,12 @@ object FitProDeviceService {
                 if (cont.isActive) cont.resume(granted)
             }
         }
-        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+        // Deliberately NOT immutable. UsbManager answers by filling EXTRA_PERMISSION_GRANTED
+        // into this PendingIntent, and an immutable one silently drops every fill-in extra — so
+        // the receiver read a grant as a denial on every single prompt. Mutable is required for
+        // UsbManager.requestPermission to work at all; the intent is package-scoped and carries a
+        // private action, so nothing outside QZ can reach it.
+        val flags = if (Build.VERSION.SDK_INT >= 31) FLAG_MUTABLE else 0
         val permissionIntent =
             PendingIntent.getBroadcast(ctx, 0, Intent(ACTION_USB_PERMISSION).setPackage(ctx.packageName), flags)
         ContextCompat.registerReceiver(

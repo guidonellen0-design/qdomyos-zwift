@@ -25,9 +25,13 @@ class UsbHidTransport(
     private var _isOpen = false
     override val isOpen: Boolean get() = _isOpen
 
+    @Volatile
+    private var consecutiveReadFailures = 0
+
     override suspend fun open() {
         if (_isOpen) return
         connection.claimInterface(usbInterface, true)
+        consecutiveReadFailures = 0
         _isOpen = true
         logger.d(TAG, "Transport opened")
     }
@@ -57,7 +61,23 @@ class UsbHidTransport(
         if (!_isOpen) return null
         val buffer = ByteArray(MAX_PACKET_SIZE)
         val transferred = connection.bulkTransfer(inEndpoint, buffer, buffer.size, READ_TIMEOUT_MS)
-        return if (transferred > 0) buffer.copyOf(transferred) else null
+        if (transferred > 0) {
+            consecutiveReadFailures = 0
+            return buffer.copyOf(transferred)
+        }
+        // bulkTransfer reports a timed-out read and a dead link identically, as a negative return,
+        // so a bare null cannot distinguish "nothing this tick" from "the interface was stolen".
+        // Returning null forever is what let a stolen claim freeze the session in silence: the
+        // poll loop treats null as benign and never counts an error, so the session state stays
+        // Streaming and nothing ever reconnects. A console that answers every poll does not go
+        // quiet for this long, so a run of failures is escalated as an exception the session can
+        // count and act on.
+        if (++consecutiveReadFailures >= MAX_CONSECUTIVE_READ_FAILURES) {
+            throw IllegalStateException(
+                "USB read failed $consecutiveReadFailures times in a row (transferred=$transferred)",
+            )
+        }
+        return null
     }
 
     override suspend fun clearBuffer() {
@@ -102,5 +122,6 @@ class UsbHidTransport(
         const val READ_TIMEOUT_MS = 1000
         const val WRITE_TIMEOUT_MS = 1000
         const val MAX_CLEAR_ATTEMPTS = 10
+        const val MAX_CONSECUTIVE_READ_FAILURES = 8
     }
 }

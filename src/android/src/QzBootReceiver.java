@@ -24,8 +24,15 @@ public class QzBootReceiver extends BroadcastReceiver {
 
     private static final String TAG = "QzBootReceiver";
 
-    /** Long enough for the iFIT stack to settle before QZ takes the foreground. */
-    private static final long START_DELAY_MS = 45_000L;
+    /**
+     * Just long enough for the home screen to settle before QZ takes the foreground. This used to
+     * be 45 seconds, on the theory that QZ had to arrive after the OEM stack to win the USB claim
+     * — but a claim can be lost at any time, not only at boot, so that was buying a delay the user
+     * felt on every start-up in exchange for a guarantee it never actually gave. The session
+     * watchdog in FitProDeviceService reclaims the interface whenever it is taken, which covers
+     * the boot race and the attract-screen hand-off alike.
+     */
+    private static final long START_DELAY_MS = 8_000L;
 
     @Override
     public void onReceive(Context context, Intent intent) {
