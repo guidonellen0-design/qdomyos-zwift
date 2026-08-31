@@ -150,6 +150,24 @@ public class CustomQtActivity extends QtActivity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        IdleAttract.onQzResumed();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        IdleAttract.onQzPaused();
+    }
+
+    @Override
+    public void onUserInteraction() {
+        super.onUserInteraction();
+        IdleAttract.onUserInteraction();
+    }
+
+    @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);

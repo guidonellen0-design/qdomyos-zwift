@@ -213,6 +213,7 @@ object FitProDeviceService {
                 newSession.exerciseData.collect { data ->
                     if (data != null) {
                         latest = data
+                        IdleAttract.onExerciseData(ctx, data)
                         updateWorkoutState(data.workoutMode)
                     }
                 }
