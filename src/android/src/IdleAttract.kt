@@ -6,38 +6,19 @@ import android.os.SystemClock
 import com.nettarion.hyperborea.core.model.ExerciseData
 
 /**
- * Screensaver for vendor consoles: the display never sleeps (the OEM app holds a permanent
- * screen wakelock), so Android's Daydream can never run. The OEM's own idle behaviour was its
- * in-app attract screen — scenery videos — shown simply because that app was front. This
- * restores it: after IDLE_TIMEOUT_MS with no pedalling and no touch while QZ is front, hand
- * the foreground to the OEM app; when pedalling resumes, bring QZ back.
+ * Screensaver for vendor consoles: the display never sleeps (QZ holds a permanent screen
+ * wakelock, so Android's own Daydream can never run) and the OEM's idle scenery is unreachable —
+ * that app needs the console board to draw anything and QZ holds the USB claim, deliberately and
+ * at all times. So QZ shows the idle screen itself: after IDLE_TIMEOUT_MS with no pedalling and
+ * no touch while QZ is front, AttractActivity takes the foreground with a picture slideshow, and
+ * when pedalling resumes QZ's own task comes back and the slideshow finishes.
  *
- * Auto-refront happens ONLY while our own attract hand-off is active, so QZ never fights a
- * user who deliberately opened some other app while riding.
+ * Auto-refront happens ONLY while our own attract screen is active, so QZ never fights a user who
+ * deliberately opened some other app while riding.
  */
 object IdleAttract {
 
     private const val TAG = "IdleAttract"
-    private const val ATTRACT_PACKAGE = "com.ifit.standalone"
-
-    /**
-     * Off, because handing the front to the OEM app does not produce the scenery screen it was
-     * meant to. Measured 2026-08-31: the hand-off fired after 10 idle minutes and the console went
-     * white and unresponsive — the OEM app had resumed onto its onboarding webview, with
-     * mCurrentFocus=null, and its task held that one activity even though it had been started from
-     * its normal LAUNCHER intent.
-     *
-     * The cause is structural rather than a bad target activity. The OEM app needs the console
-     * board to show anything, and QZ holds the USB claim; QZ cannot hand the board over either,
-     * because pedalling detected through that same board is the only signal for bringing QZ back.
-     * Nor can QZ tell what the other app ended up displaying — getRunningTasks reports only our own
-     * tasks from API 28 — so there is no way to front it, check, and retreat on failure.
-     *
-     * Leaving this on costs a white screen every ten idle minutes, so the idle timer still runs and
-     * the refront still works; only the hand-off is suppressed. Setting this true restores the old
-     * behaviour unchanged.
-     */
-    private const val ATTRACT_HANDOFF_ENABLED = false
     private const val IDLE_TIMEOUT_MS = 10 * 60_000L
     private const val REFRONT_COOLDOWN_MS = 15_000L
 
@@ -77,11 +58,21 @@ object IdleAttract {
         }
         if (qzResumed && !attractActive && now - lastActiveMs > IDLE_TIMEOUT_MS) {
             attractActive = true
-            if (ATTRACT_HANDOFF_ENABLED) {
-                front(ctx, ATTRACT_PACKAGE, "idle ${IDLE_TIMEOUT_MS / 60_000} min — handing front to attract screen")
-            } else {
-                QLog.i(TAG, "idle ${IDLE_TIMEOUT_MS / 60_000} min — attract hand-off disabled, staying on QZ")
-            }
+            startAttract(ctx)
+        }
+    }
+
+    private fun startAttract(ctx: Context) {
+        QLog.i(TAG, "idle ${IDLE_TIMEOUT_MS / 60_000} min — starting attract slideshow")
+        // Its own task, not ours: fronting QZ later must cover the slideshow rather than land
+        // behind it, and the slideshow must never be what the rider finds on top of QZ's task.
+        val intent = Intent(ctx, AttractActivity::class.java)
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        try {
+            ctx.startActivity(intent)
+        } catch (e: Exception) {
+            QLog.w(TAG, "starting attract slideshow failed: ${e.message}")
+            attractActive = false
         }
     }
 

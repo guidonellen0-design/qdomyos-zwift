@@ -124,6 +124,18 @@
                                     android:value="ocr" />
 
 				<activity android:name="org.cagnulen.qdomyoszwift.MyActivity" />
+
+                                <!-- Idle slideshow. Its own taskAffinity so fronting QZ's main
+                                     task covers it; excluded from recents so it is never what a
+                                     task switch lands on. -->
+                                <activity
+                                    android:name=".AttractActivity"
+                                    android:exported="false"
+                                    android:excludeFromRecents="true"
+                                    android:launchMode="singleTask"
+                                    android:taskAffinity="org.cagnulen.qdomyoszwift.attract"
+                                    android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+                                    android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density" />
                                 <activity
                                     android:name=".HealthConnectPermissionActivity"
                                     android:exported="false"
