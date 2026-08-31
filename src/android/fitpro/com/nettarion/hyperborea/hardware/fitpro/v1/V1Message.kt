@@ -202,7 +202,7 @@ enum class V1DataField(val fieldIndex: Int, val sizeBytes: Int, val converter: V
          * bytes on that console and lost its last ten fields -- FAN_STATE among them,
          * which is why the fan always read 0 there.
          *
-         * This list is 55 bytes / 23 fields on a bike, once computePollFields() drops
+         * This list is 51 bytes / 20 fields on a bike, once computePollFields() drops
          * the rower entries the capability bitmask doesn't claim.
          *
          * Removed relative to the previous list, and why:
@@ -220,17 +220,26 @@ enum class V1DataField(val fieldIndex: Int, val sizeBytes: Int, val converter: V
             WATTS, RPM, PULSE, ACTUAL_KPH, ACTUAL_INCLINE, KPH,
             // Session tracking
             CURRENT_DISTANCE, CURRENT_CALORIES, CURRENT_TIME,
-            GRADE, RESISTANCE, GEAR, WORKOUT_MODE,
+            GRADE, RESISTANCE, WORKOUT_MODE,
             LAP_TIME, AVERAGE_GRADE, AVERAGE_WATTS,
             VERTICAL_METER_NET, VERTICAL_METER_GAIN,
             START_REQUESTED, RECOVERABLE_PAUSED_TIME,
             // Config/target readback.
             // WATT_GOAL (2B), IS_CONSTANT_WATTS_MODE (1B) and IS_READY_TO_DISCONNECT
-            // (1B) are deliberately NOT polled. The console truncates any
-            // DataResponse over 55 bytes; with GEAR added the 24-field shape came to
-            // 56 and the tail decoded as garbage. Dropping these three buys 4 bytes
-            // and puts the poll at 21 fields / 52 bytes. GEAR is worth far more than
-            // three values QZ itself writes and never needs read back.
+            // (1B) are deliberately NOT polled: all three are values QZ itself writes
+            // and never needs read back, and IS_READY_TO_DISCONNECT still works at
+            // teardown, which uses its own single-field read.
+            //
+            // GEAR is not polled either, and that is a fix rather than a saving. The
+            // S22i advertises bit 26 but never returned a usable gear: it read a
+            // constant 0 from the day it was added, and the response size stopped
+            // matching the requested shape on that same day. GEAR sits at offset 33,
+            // ahead of FAN_STATE at 47, and every field behind it went stale --
+            // measured 2026-08-31, six console fan-key presses that audibly changed
+            // the fan produced no FAN_STATE change at all, while the fields before
+            // offset 33 (speed, watts, cadence, distance, calories, time) stayed
+            // correct throughout. That is what puts the divergence at GEAR. Do not
+            // re-add it without re-reading docs/read-budget.md.
             FAN_STATE,
             // Rower data
             STROKES, STROKES_PER_MINUTE,

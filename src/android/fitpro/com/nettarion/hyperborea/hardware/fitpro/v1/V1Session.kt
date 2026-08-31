@@ -835,7 +835,8 @@ class V1Session(
                     TAG,
                     "DataResponse payload size doesn't match the requested ${pollFields.size}-field shape " +
                         "(expected ${pollFields.sumOf { it.sizeBytes }}B of field data, " +
-                        "raw packet ${firstPacket.size}B; " +
+                        "got ${firstPacket.payloadSize()}B (declared ${firstPacket.declaredLength()}B, " +
+                        "USB frame ${firstPacket.size}B); raw=[${firstPacket.toHexDump()}]; " +
                         "requested=[${pollFields.sortedBy { it.fieldIndex }.joinToString { it.name }}], " +
                         "decoded ${decoded.fields.size}=[${decoded.fields.keys.joinToString { it.name }}], " +
                         "supportedBitFields=${supportedBitFields.sorted()}) — later field offsets may be unreliable.",
@@ -851,7 +852,10 @@ class V1Session(
                     TAG,
                     "Poll size baseline: ${pollFields.size} fields, " +
                         "${pollFields.sumOf { it.sizeBytes }}B of field data requested, " +
-                        "raw packet ${firstPacket.size}B, truncated=${decoded.isTruncated}",
+                        "got ${firstPacket.payloadSize()}B (declared ${firstPacket.declaredLength()}B, " +
+                        "USB frame ${firstPacket.size}B), truncated=${decoded.isTruncated}; " +
+                        "requested=[${pollFields.sortedBy { it.fieldIndex }.joinToString { "${it.name}:${it.sizeBytes}" }}]; " +
+                        "raw=[${firstPacket.toHexDump()}]",
                 )
             }
             lastTruncatedSeen = decoded.isTruncated
@@ -1100,11 +1104,27 @@ class V1Session(
         return V1Codec.decodeSingle(firstPacket, dataResponseFields)
     }
 
+    /** Length the MCU declares in byte[1]. USB pads every read to 64, so [ByteArray.size] cannot be used. */
+    private fun ByteArray.declaredLength(): Int = if (size > 1) this[1].toInt() and 0xFF else size
+
+    /** Field-data bytes in a response: the declared length less the 4-byte header and the checksum. */
+    private fun ByteArray.payloadSize(): Int = (declaredLength() - V1_HEADER_AND_CHECKSUM).coerceAtLeast(0)
+
+    /**
+     * Hex of the whole USB frame, padding included. The point of the dump is that the declared
+     * length is the thing under suspicion, so it must not also be what decides how much to print.
+     */
+    private fun ByteArray.toHexDump(): String = joinToString(" ") { "%02X".format(it) }
+
     private fun roundToStep(value: Float, step: Float): Float =
         (value / step).roundToInt() * step
 
     companion object {
         private const val TAG = "V1Session"
+
+        // A response is [device, length, command, status, payload..., checksum]: 4 header bytes
+        // plus the trailing checksum sit outside the field data. Mirrors V1Codec.HEADER_SIZE.
+        private const val V1_HEADER_AND_CHECKSUM = 5
         private const val POLL_INTERVAL_MS = 100L
         private const val COMMAND_DELAY_MS = 100L
         private const val READ_DELAY_MS = 0L
