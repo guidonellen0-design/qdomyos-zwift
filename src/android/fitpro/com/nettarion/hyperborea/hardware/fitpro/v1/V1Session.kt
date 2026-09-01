@@ -120,6 +120,14 @@ class V1Session(
 
     /** Tracks whether the previous poll's response was flagged truncated, so we log only on the edge. */
     private var lastTruncatedSeen: Boolean = false
+
+    /**
+     * Whether each poll cycle is chased with a KEY_OBJECT-only read. KEY_OBJECT (14B) cannot ride
+     * in [pollFields]: this console's reply cap (see the read-budget notes) would silently truncate
+     * every field behind it. A second tiny read keeps the main poll shape untouched and still
+     * samples the keypad ~each cycle.
+     */
+    private var pollKeypad = false
     private var loggedPayloadBaseline = false
 
     override suspend fun start() {
@@ -425,6 +433,10 @@ class V1Session(
                 "${supportedBitFields.sorted()}",
         )
         pollFields = computePollFields(supportedBitFields)
+        pollKeypad = supportedBitFields.isEmpty() ||
+            V1DataField.KEY_OBJECT.fieldIndex in supportedBitFields
+        logger.i(TAG, "Keypad polling ${if (pollKeypad) "enabled" else "disabled"} " +
+            "(KEY_OBJECT bit ${V1DataField.KEY_OBJECT.fieldIndex})")
         detectedDeviceType = DeviceDatabase.deviceTypeFromEquipmentId(equipmentDeviceId)
         logger.d(TAG, "Detected device type: $detectedDeviceType")
 
@@ -764,6 +776,25 @@ class V1Session(
 
     private suspend fun pollOnce() = ioMutex.withLock {
         pollOnceLocked()
+        if (pollKeypad) pollKeypadOnce()
+    }
+
+    /**
+     * One KEY_OBJECT-only read, chasing the main poll inside the same mutex hold. The response
+     * decodes onto [V1Message.Incoming.DataResponse.keyObject], not the fields map, so it never
+     * goes through the truncation/empty-fields checks that assume the [pollFields] shape.
+     * KEY_OBJECT reports the currently-pressed key and 0 on release, so this read is also what
+     * clears the edge detector in [handleKeyObject] between presses.
+     */
+    private suspend fun pollKeypadOnce() {
+        val response = try {
+            sendReadWrite(readFields = KEYPAD_READ_FIELDS)
+        } catch (e: Exception) {
+            logger.w(TAG, "Keypad poll failed: ${e.message}")
+            return
+        }
+        if (response == null || response.status != V1Message.STATUS_DONE) return
+        handleKeyObject(response.keyObject)
     }
 
     private suspend fun pollOnceLocked() {
@@ -861,7 +892,7 @@ class V1Session(
             lastTruncatedSeen = decoded.isTruncated
 
             applyDataResponse(decoded.fields)
-            handleKeyObject(decoded.keyObject)
+            decoded.keyObject?.let { handleKeyObject(it) }
             estimatePowerIfNeeded()
             consecutivePollErrors = 0
             _exerciseData.value = accumulator.snapshot()
@@ -1003,8 +1034,9 @@ class V1Session(
      * *currently-pressed* key (and 0 on release), so we edge-detect: emit when the code changes to a
      * new non-zero value. The equipment's own MCU acts on every one of these keys directly (changing
      * resistance/incline/speed, transitioning the workout state machine on START/STOP, etc.) and the
-     * new state flows up through normal polling — so we don't drive anything from this stream, it's
-     * pure UI / diagnostic plumbing.
+     * new state flows up through normal polling. Exception, measured on the S22i: while an app
+     * drives the brake over FTMS the MCU leaves the resistance +/- keys unacted, so
+     * FitProDeviceService subscribes to this stream and closes that loop itself.
      */
     private fun handleKeyObject(keyObject: KeyObject?) {
         val code = keyObject?.code ?: 0
@@ -1172,5 +1204,7 @@ class V1Session(
         private const val KEY_RESISTANCE_DOWN = 8
         private const val KEY_GEAR_UP = 9
         private const val KEY_GEAR_DOWN = 10
+
+        private val KEYPAD_READ_FIELDS = setOf(V1DataField.KEY_OBJECT)
     }
 }

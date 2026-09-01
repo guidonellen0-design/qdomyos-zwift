@@ -14,6 +14,7 @@ import android.hardware.usb.UsbManager
 import android.os.Build
 import androidx.core.content.ContextCompat
 import com.nettarion.hyperborea.core.AppLogger
+import com.nettarion.hyperborea.core.model.ConsoleKey
 import com.nettarion.hyperborea.core.model.DeviceCommand
 import com.nettarion.hyperborea.core.model.ExerciseData
 import com.nettarion.hyperborea.hardware.fitpro.session.DeviceDatabase
@@ -112,6 +113,7 @@ object FitProDeviceService {
     private var collectJob: Job? = null
     private var connectJob: Job? = null
     private var watchdogJob: Job? = null
+    private var keypadJob: Job? = null
     private var recoverJob: Job? = null
     @Volatile private var recovering = false
     @Volatile private var connecting = false
@@ -228,6 +230,27 @@ object FitProDeviceService {
                     }
                 }
             }
+
+            // The console's resistance +/- keys do nothing by themselves while QZ owns the board:
+            // presses arrive in KEY_OBJECT but the MCU never moves the brake (measured on the S22i
+            // 2026-08-31 — a whole ride of presses, resistance frozen). So act on that pair here.
+            // Incline stays observe-only: the MCU does drive the incline motor itself, and
+            // commanding it again on the same press would double-step it.
+            keypadJob = scope.launch {
+                newSession.consoleKeyPresses.collect { key ->
+                    when (key) {
+                        ConsoleKey.RESISTANCE_UP -> {
+                            QLog.i(TAG, "Console keypad: $key -> adjustResistance(+1)")
+                            adjustResistance(1.0)
+                        }
+                        ConsoleKey.RESISTANCE_DOWN -> {
+                            QLog.i(TAG, "Console keypad: $key -> adjustResistance(-1)")
+                            adjustResistance(-1.0)
+                        }
+                        else -> { /* MCU acts on these directly */ }
+                    }
+                }
+            }
             return true
         } catch (e: Exception) {
             QLog.e(TAG, "FitPro connect failed", e)
@@ -252,6 +275,8 @@ object FitProDeviceService {
             collectJob = null
             watchdogJob?.cancel()
             watchdogJob = null
+            keypadJob?.cancel()
+            keypadJob = null
             try { s?.stop() } catch (e: Exception) { QLog.w(TAG, "stop error during recovery: ${e.message}") }
             latest = ExerciseData.ZERO
             delay(RECONNECT_SETTLE_MS)
@@ -272,6 +297,8 @@ object FitProDeviceService {
         collectJob = null
         watchdogJob?.cancel()
         watchdogJob = null
+        keypadJob?.cancel()
+        keypadJob = null
         // Cancel any in-flight recovery too, or a shutdown racing one would be undone by the
         // reconnect that recovery schedules after its settle delay.
         recoverJob?.cancel()

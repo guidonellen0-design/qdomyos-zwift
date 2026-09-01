@@ -5,10 +5,11 @@ package com.nettarion.hyperborea.core.model
  * hardware adapter exposes a stream of these — one per press — on
  * [com.nettarion.hyperborea.core.adapter.HardwareAdapter.consoleKeyPresses].
  *
- * This is observe-only: the equipment's own MCU acts on these keys directly (changing
- * resistance/incline/speed, transitioning the workout state machine on START/STOP, etc.) and the
- * new state flows up through normal polling. Nothing in the Hyperborea pipeline drives the
- * hardware from this stream — it exists for UI/diagnostics.
+ * This is mostly observe-only: the equipment's own MCU acts on these keys directly (changing
+ * incline/speed, transitioning the workout state machine on START/STOP, etc.) and the new state
+ * flows up through normal polling. Measured exception: with an app driving the brake over FTMS
+ * the MCU leaves the resistance +/- keys unacted, so FitProDeviceService subscribes to this
+ * stream and applies [RESISTANCE_UP]/[RESISTANCE_DOWN] itself.
  *
  * One firmware-level subtlety: on a FitPro V1 treadmill the MCU itself gates belt motion on the
  * physical [START] key (the rising edge of the read-only `START_REQUESTED` telemetry field, set
