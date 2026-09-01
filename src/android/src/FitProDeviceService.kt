@@ -12,6 +12,7 @@ import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.os.Build
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import com.nettarion.hyperborea.core.AppLogger
 import com.nettarion.hyperborea.core.model.ConsoleKey
@@ -81,6 +82,12 @@ object FitProDeviceService {
     // enough for the other side to finish its own claim rather than trading it back immediately.
     private const val RECONNECT_SETTLE_MS = 3_000L
 
+    // How long a commanded-but-unconfirmed resistance target is trusted as the base for the next
+    // key press. Longer than one poll round-trip (~0.6 s) so a rapid burst accumulates; short enough
+    // that a target the board can't reach (commanded past its physical max) is forgotten before the
+    // rider presses again in the other direction.
+    private const val PENDING_RESISTANCE_TTL_MS = 2_000L
+
     // QZ workout states, mirroring the gRPC WorkoutState the C++ layer expects.
     private const val STATE_IDLE = 1
     private const val STATE_RUNNING = 3
@@ -110,6 +117,16 @@ object FitProDeviceService {
     // count (QZ "Max. Resistance" bike option); when set to a sane value we rescale onto it.
     @Volatile private var sourceMaxResistance: Int = 0
     @Volatile private var qzMaxResistance: Int = 0
+    // Pending resistance target: each +/- key press commands SetResistance(latest+delta), but the
+    // board's reported level lags the command by ~0.6 s (one poll round-trip). Two presses closer
+    // than that would both read the same stale latest.resistance and recompute the same target, so
+    // the second press is a silent no-op ("needs two presses to move one step", and a fast burst
+    // stalls short of the top). Basing each press on the last *commanded* level instead lets a burst
+    // accumulate. Cleared once the board catches up (reconciled in the exerciseData collector); a TTL
+    // bounds the one case the board can't catch up — a command past its physical max — so a later
+    // press re-bases off the real level instead of counting down from a phantom target.
+    @Volatile private var pendingResistance: Int? = null
+    @Volatile private var pendingResistanceAt: Long = 0L
     private var collectJob: Job? = null
     private var connectJob: Job? = null
     private var watchdogJob: Job? = null
@@ -212,6 +229,11 @@ object FitProDeviceService {
                 newSession.exerciseData.collect { data ->
                     if (data != null) {
                         latest = data
+                        // The board has caught up to the last commanded resistance: stop basing the
+                        // next press on the pending target and let it read the real level again.
+                        if (pendingResistance != null && data.resistance == pendingResistance) {
+                            pendingResistance = null
+                        }
                         IdleAttract.onExerciseData(ctx, data)
                         updateWorkoutState(data.workoutMode)
                     }
@@ -240,12 +262,12 @@ object FitProDeviceService {
                 newSession.consoleKeyPresses.collect { key ->
                     when (key) {
                         ConsoleKey.RESISTANCE_UP -> {
-                            QLog.i(TAG, "Console keypad: $key -> adjustResistance(+1)")
-                            adjustResistance(1.0)
+                            QLog.i(TAG, "Console keypad: $key -> stepResistanceFromKeypad(+1)")
+                            stepResistanceFromKeypad(1.0)
                         }
                         ConsoleKey.RESISTANCE_DOWN -> {
-                            QLog.i(TAG, "Console keypad: $key -> adjustResistance(-1)")
-                            adjustResistance(-1.0)
+                            QLog.i(TAG, "Console keypad: $key -> stepResistanceFromKeypad(-1)")
+                            stepResistanceFromKeypad(-1.0)
                         }
                         else -> { /* MCU acts on these directly */ }
                     }
@@ -279,6 +301,7 @@ object FitProDeviceService {
             keypadJob = null
             try { s?.stop() } catch (e: Exception) { QLog.w(TAG, "stop error during recovery: ${e.message}") }
             latest = ExerciseData.ZERO
+            pendingResistance = null
             delay(RECONNECT_SETTLE_MS)
             recovering = false
             initialize("")
@@ -310,6 +333,7 @@ object FitProDeviceService {
         stateChangeQueue.clear()
         currentWorkoutState = STATE_IDLE
         latest = ExerciseData.ZERO
+        pendingResistance = null
     }
 
     // The FitPro session polls continuously once started; these are no-ops kept for API parity.
@@ -365,9 +389,31 @@ object FitProDeviceService {
         send(DeviceCommand.SetIncline(target))
     }
 
+    // JNI surface, also used by the C++ ERG/absolute-resistance path, which passes
+    // (desiredLevel - currentBoardLevel) and so expects the step to land on the board's actual
+    // level — each such command is self-correcting. Keypad presses need different semantics
+    // (accumulate off the last commanded target); see stepResistanceFromKeypad.
     @JvmStatic
     fun adjustResistance(delta: Double) {
         val target = ((latest.resistance ?: 0) + delta).roundToInt().coerceAtLeast(0)
+        send(DeviceCommand.SetResistance(target))
+    }
+
+    // A console +/- key press means "one step from what I last asked for", not "one step from what
+    // the board currently shows" — and the board's report lags the command by ~0.6 s (one poll
+    // round-trip). Basing the step on the board level makes two presses closer than that both read
+    // the same stale value and command the same target, so the second press is a silent no-op
+    // ("needs two presses to move one step", and a fast burst stalls short of the top). Base it on
+    // the last commanded target while that is still fresh so a burst accumulates. pendingResistance
+    // is cleared when the board catches up (exerciseData collector); the TTL bounds the one case it
+    // can't — a command past the board's physical max — so a later press re-bases off the real level.
+    private fun stepResistanceFromKeypad(delta: Double) {
+        val now = SystemClock.elapsedRealtime()
+        val base = pendingResistance?.takeIf { now - pendingResistanceAt < PENDING_RESISTANCE_TTL_MS }
+            ?: (latest.resistance ?: 0)
+        val target = (base + delta).roundToInt().coerceAtLeast(0)
+        pendingResistance = target
+        pendingResistanceAt = now
         send(DeviceCommand.SetResistance(target))
     }
 
