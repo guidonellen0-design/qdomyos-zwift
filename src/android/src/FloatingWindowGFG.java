@@ -68,10 +68,6 @@ public class FloatingWindowGFG extends Service {
 		  "com.google.android.youtube.tv",
 		  "com.liskovsoft.smarttubetv.beta",  // SmartTube
 		  "com.teamsmart.videomanager.tv",
-		  "com.limelight",                    // Moonlight - the metrics overlay
-		                                      // is wanted on top of a streamed
-		                                      // ride, which is a full-screen
-		                                      // video surface like the rest.
 	 };
 	 private static final int FOREGROUND_POLL_MS = 1000;
 	 private AppChecker appChecker;
