@@ -74,8 +74,8 @@ class V1Session(
     private var lastFanRaw = -1 // edge-triggered FAN_STATE diagnostic
     private val resistance = ResistanceConverter(deviceInfo.maxResistance)
     private var gearSeen = false // GEAR is authoritative once the board proves it reports it
-    private var gearAddressed = false // bike board that declares GEAR: SetResistance writes GEAR
-    private var lastCommandedGear = -1 // what we last wrote to GEAR; the UI source when gearAddressed
+    private var gearAddressed = false // bike board that declares GEAR (diagnostic; writes still gated)
+    private var lastCommandedGear = -1 // what we last wrote to GEAR, for the telemetry line
     private var lastBrakeLevel = -1 // RESISTANCE field, kept for diagnostics only
     private val gripHeartRate = GripHeartRateFilter()
 
@@ -367,7 +367,17 @@ class V1Session(
             // all, and on handback QZ read resistance=0 while the machine sat at gear 3. So on a
             // bike that *declares* GEAR we address the brake by GEAR from the handshake on,
             // without needing a readback to prove it first.
-            if (gearSeen || gearAddressed) {
+            // 2026-09-02, measured twice on the S22i: taking this branch on [gearAddressed] alone
+            // resets the controller. The GEAR write goes out, the board stops answering, the next
+            // ten poll writes fail with `transferred=-1`, and the USB device re-enumerates about
+            // 40 s later (devnum bumps; QZ reconnects by itself, no power cycle). A FAN_STATE write
+            // - field 98, thirteen bitmask sections against GEAR's four - goes through the exact
+            // same encoder and is accepted, so the frame shape is not the problem: field 26 alone
+            // is. Reading it inside the periodic set corrupts every field after it, which is the
+            // same defect seen from the other end. Both are what a wrong [sizeBytes] looks like,
+            // so [probeFieldSizes] now measures the controller's real width for it. Until that
+            // measurement is in, gate the write on a *polled* gear, exactly as before.
+            if (gearSeen) {
                 val maxGear = deviceInfo.maxResistance.takeIf { it > 0 } ?: command.level
                 val gear = command.level.coerceIn(1, maxGear)
                 lastCommandedGear = gear
@@ -464,8 +474,8 @@ class V1Session(
             logger.i(
                 TAG,
                 "Gear-addressed bike (equipmentDeviceId=$equipmentDeviceId, GEAR bit " +
-                    "${V1DataField.GEAR.fieldIndex} declared); SetResistance writes GEAR on the " +
-                    "1..${this.deviceInfo.maxResistance} scale",
+                    "${V1DataField.GEAR.fieldIndex} declared, MaxGear ${this.deviceInfo.maxResistance}); " +
+                    "the GEAR write is held back until a probe settles the field's real width",
             )
         }
         pollFields = computePollFields(supportedBitFields)
@@ -610,6 +620,45 @@ class V1Session(
         val eqDist = fields[V1DataField.MOTOR_TOTAL_DISTANCE]?.let { it / lifetimeScale }
         _deviceIdentity.value = _deviceIdentity.value?.copy(equipmentHours = eqHours, equipmentDistance = eqDist)
         logger.i(TAG, "Equipment stats: totalTime=${eqHours}s, totalDistance=${eqDist}m")
+        probeFieldSizes(
+            listOf(
+                V1DataField.KPH, // known-good 2-byte control
+                V1DataField.RESISTANCE,
+                V1DataField.GEAR,
+                V1DataField.MAX_RESISTANCE_LEVEL,
+            ),
+        )
+    }
+
+    /**
+     * Reads [fields] **one at a time** and logs each raw response frame.
+     *
+     * A single-field read cannot be thrown off by a wrong width in an earlier field, so the frame's
+     * own declared length (byte 1) is direct evidence of how many data bytes this controller carries
+     * for that field — which is exactly what [V1DataField.sizeBytes] only guesses. Payload after the
+     * 4-byte header is `[numSections][mask…][data…]`, so `data = declaredLen − 1 − HEADER_SIZE −
+     * 1 − numSections`.
+     *
+     * Diagnostic only: it costs a few extra reads once per session and writes nothing.
+     */
+    private suspend fun probeFieldSizes(fields: List<V1DataField>) {
+        for (field in fields) {
+            writeMessage(V1Message.Outgoing.ReadWriteData(readFields = setOf(field)))
+            delay(READ_DELAY_MS)
+            val raw = readPacketOrNull()
+            if (raw == null) {
+                logger.i(TAG, "Field probe ${field.name}(${field.fieldIndex}): no response")
+                continue
+            }
+            val declaredLen = raw.getOrNull(1)?.toInt()?.and(0xFF) ?: 0
+            val hex = raw.take(maxOf(declaredLen, 16)).joinToString(" ") { "%02X".format(it) }
+            val decoded = V1Codec.decodeSingleDataResponse(raw, setOf(field))?.fields?.get(field)
+            logger.i(
+                TAG,
+                "Field probe ${field.name}(${field.fieldIndex}) assumedSize=${field.sizeBytes} " +
+                    "declaredLen=$declaredLen decoded=$decoded raw=$hex",
+            )
+        }
     }
 
     /**
@@ -983,19 +1032,10 @@ class V1Session(
                 }
                 V1DataField.RESISTANCE -> {
                     lastBrakeLevel = resistance.rawToLevel(value.toInt())
-                    when {
-                        gearSeen -> Unit // GEAR poll already drives the UI
-                        // Gear-addressed board with GEAR unpollable (S22i): the RESISTANCE
-                        // readback sits at 0 no matter where the brake actually is - measured
-                        // 2026-09-02, iFIT left the machine at gear 3 and this field still read
-                        // 0 - so showing it would pin the UI to 0 and make every relative
-                        // adjustment compute its delta from 0. Our own last commanded gear is
-                        // the only truthful source until GEAR can be polled again.
-                        gearAddressed -> if (lastCommandedGear > 0) {
-                            accumulator.updateResistance(lastCommandedGear)
-                        }
-                        else -> accumulator.updateResistance(lastBrakeLevel)
-                    }
+                    // Showing our own last commanded gear here instead was tried on 2026-09-02 and
+                    // reverted: with nothing commanded yet it leaves resistance null, so the UI and
+                    // every FTMS/DIRCON reader see no resistance at all rather than a stale one.
+                    if (!gearSeen) accumulator.updateResistance(lastBrakeLevel)
                 }
                 V1DataField.ACTUAL_INCLINE -> accumulator.updateIncline(value)
                 V1DataField.GRADE -> accumulator.updateTargetIncline(value)
