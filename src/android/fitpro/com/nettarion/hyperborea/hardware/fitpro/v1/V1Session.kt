@@ -15,6 +15,7 @@ import com.nettarion.hyperborea.hardware.fitpro.session.GripHeartRateFilter
 import com.nettarion.hyperborea.hardware.fitpro.session.PowerEstimator
 import com.nettarion.hyperborea.hardware.fitpro.session.SessionState
 import com.nettarion.hyperborea.hardware.fitpro.transport.HidTransport
+import java.io.File
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -374,9 +375,15 @@ class V1Session(
             // - field 98, thirteen bitmask sections against GEAR's four - goes through the exact
             // same encoder and is accepted, so the frame shape is not the problem: field 26 alone
             // is. Reading it inside the periodic set corrupts every field after it, which is the
-            // same defect seen from the other end. Both are what a wrong [sizeBytes] looks like,
-            // so [probeFieldSizes] now measures the controller's real width for it. Until that
-            // measurement is in, gate the write on a *polled* gear, exactly as before.
+            // same defect seen from the other end. Both are what a wrong [sizeBytes] looks like.
+            // 2026-09-02, [probeFieldSizes] settled it: a single-field read of GEAR came back
+            // `08 0D 02 02 00 00 27 01 01 07 21 19 83` - declared length 13, so **8 data bytes**,
+            // against the 1 this table declares. (Checksum verifies, and the same probe reproduced
+            // KPH/RESISTANCE at 2 and MAX_RESISTANCE_LEVEL at 1, so the frame is being read right.)
+            // A 1-byte write is therefore seven bytes short of the frame the MCU is parsing, and a
+            // 1-byte read shifts every field behind it - one cause, both symptoms.
+            // What those 8 bytes *mean* is still unknown, so the write stays gated on a polled
+            // gear; [benchTick] is how the layout gets swept without another build.
             if (gearSeen) {
                 val maxGear = deviceInfo.maxResistance.takeIf { it > 0 } ?: command.level
                 val gear = command.level.coerceIn(1, maxGear)
@@ -620,24 +627,28 @@ class V1Session(
         val eqDist = fields[V1DataField.MOTOR_TOTAL_DISTANCE]?.let { it / lifetimeScale }
         _deviceIdentity.value = _deviceIdentity.value?.copy(equipmentHours = eqHours, equipmentDistance = eqDist)
         logger.i(TAG, "Equipment stats: totalTime=${eqHours}s, totalDistance=${eqDist}m")
-        probeFieldSizes(
-            listOf(
-                V1DataField.KPH, // known-good 2-byte control
-                V1DataField.RESISTANCE,
-                V1DataField.GEAR,
-                V1DataField.MAX_RESISTANCE_LEVEL,
-            ),
-        )
+        val probeIndices = probeFieldIndices()
+        probeFieldSizes(V1DataField.entries.filter { it.fieldIndex in probeIndices })
     }
+
+    /**
+     * Which field indices the startup width probe covers: everything the controller says it
+     * supports, so one session's log carries the board's whole real table. Falls back to the
+     * poll set plus [V1DataField.GEAR] on a board that declared no bitmask.
+     */
+    private fun probeFieldIndices(): Set<Int> =
+        supportedBitFields.ifEmpty { pollFields.map { it.fieldIndex }.toSet() + V1DataField.GEAR.fieldIndex }
 
     /**
      * Reads [fields] **one at a time** and logs each raw response frame.
      *
      * A single-field read cannot be thrown off by a wrong width in an earlier field, so the frame's
      * own declared length (byte 1) is direct evidence of how many data bytes this controller carries
-     * for that field — which is exactly what [V1DataField.sizeBytes] only guesses. Payload after the
-     * 4-byte header is `[numSections][mask…][data…]`, so `data = declaredLen − 1 − HEADER_SIZE −
-     * 1 − numSections`.
+     * for that field — which is exactly what [V1DataField.sizeBytes] only guesses. A response frame
+     * is `[deviceId][declaredLen][command][status][data…][checksum]`, so the field's true width is
+     * `declaredLen − 5`. Measured on the S22i 2026-09-02: every field matched its declared
+     * [V1DataField.sizeBytes] except `GEAR`, which came back **8 bytes** against the 1 the table
+     * claims — which is why reading it corrupts every later field and writing it wedges the board.
      *
      * Diagnostic only: it costs a few extra reads once per session and writes nothing.
      */
@@ -650,15 +661,124 @@ class V1Session(
                 logger.i(TAG, "Field probe ${field.name}(${field.fieldIndex}): no response")
                 continue
             }
-            val declaredLen = raw.getOrNull(1)?.toInt()?.and(0xFF) ?: 0
-            val hex = raw.take(maxOf(declaredLen, 16)).joinToString(" ") { "%02X".format(it) }
+            val actualSize = raw.payloadSize()
             val decoded = V1Codec.decodeSingleDataResponse(raw, setOf(field))?.fields?.get(field)
             logger.i(
                 TAG,
                 "Field probe ${field.name}(${field.fieldIndex}) assumedSize=${field.sizeBytes} " +
-                    "declaredLen=$declaredLen decoded=$decoded raw=$hex",
+                    "actualSize=$actualSize${if (actualSize == field.sizeBytes) "" else " MISMATCH"} " +
+                    "decoded=$decoded declaredLen=${raw.declaredLength()} raw=${raw.toHexDump()}",
             )
         }
+    }
+
+    /**
+     * A ReadWriteData frame assembled from raw field indices and raw data bytes, bypassing
+     * [V1DataField] entirely. Mirrors `V1Codec.encodeReadWriteData`: the payload is the write
+     * bitmask and its data followed by the read bitmask, each `[numSections][one mask per section]`.
+     *
+     * Raw indices rather than enum entries because the enum's widths are the thing under suspicion:
+     * `GEAR` measured 8 data bytes on the S22i against the 1 it declares, and the indices the enum
+     * has no entry for at all (23-25) have never been looked at.
+     */
+    private fun buildRawReadWrite(
+        writeIndex: Int? = null,
+        writeData: ByteArray = ByteArray(0),
+        readIndices: List<Int> = emptyList(),
+    ): ByteArray {
+        fun bitmask(indices: List<Int>): ByteArray {
+            val highest = indices.maxOrNull() ?: return byteArrayOf(0)
+            val sections = (highest / 8) + 1
+            val out = ByteArray(sections + 1)
+            out[0] = sections.toByte()
+            for (i in indices) out[1 + i / 8] = (out[1 + i / 8].toInt() or (1 shl (i % 8))).toByte()
+            return out
+        }
+        val writePayload = if (writeIndex == null) byteArrayOf(0) else bitmask(listOf(writeIndex)) + writeData
+        val payload = writePayload + bitmask(readIndices)
+        val total = payload.size + V1_REQUEST_OVERHEAD
+        val packet = ByteArray(total)
+        packet[0] = V1Message.DEVICE_MAIN.toByte()
+        packet[1] = total.toByte()
+        packet[2] = BENCH_CMD_READ_WRITE_DATA
+        payload.copyInto(packet, 3)
+        packet[total - 1] = V1Codec.checksum(packet.copyOfRange(0, total - 1))
+        return packet
+    }
+
+    /**
+     * A protocol bench driven from a file, so a byte-layout sweep can be run over ADB with no
+     * further build. Nothing happens unless the file exists, and it is deleted as soon as it is
+     * read. One line in [BENCH_COMMAND_FILE], run on the next poll tick inside the same mutex hold:
+     *
+     *  - `read <index> [<index>…]` — one ReadWriteData read of those raw field indices.
+     *  - `write <index> <hex byte>…` — write those exact data bytes to that field index and read
+     *    the field back in the same frame.
+     *  - `sample <index> <count> <intervalMs>` — repeat a single-field read, which is how a byte
+     *    that tracks the machine is told apart from a constant.
+     *
+     * A malformed write can knock this controller off the USB bus. It re-enumerates by itself in
+     * about 40 s and the session reconnects, so a bad sweep step costs a wait, not a power cycle.
+     */
+    private suspend fun benchTick() {
+        val file = File(BENCH_COMMAND_FILE)
+        if (!file.isFile) return
+        val line = try {
+            file.readText().trim()
+        } catch (e: Exception) {
+            logger.w(TAG, "Bench: unreadable command file: ${e.message}")
+            return
+        } finally {
+            // Delete before executing: a command that wedges the board must not re-run every poll.
+            runCatching { file.delete() }
+        }
+
+        val parts = line.split(' ', '\t', '\n').filter { it.isNotEmpty() }
+        if (parts.isEmpty()) return
+        try {
+            when (parts[0].lowercase()) {
+                "read" -> benchRead(parts.drop(1).map { it.toInt() }, "read")
+                "write" -> benchWrite(parts[1].toInt(), parts.drop(2).map { it.toInt(16).toByte() }.toByteArray())
+                "sample" -> {
+                    val index = parts[1].toInt()
+                    val count = parts[2].toInt().coerceIn(1, 120)
+                    val intervalMs = parts[3].toLong().coerceIn(50L, 5_000L)
+                    for (i in 1..count) {
+                        benchRead(listOf(index), "sample $i/$count")
+                        delay(intervalMs)
+                    }
+                }
+                else -> logger.w(TAG, "Bench: unknown command '$line'")
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logger.w(TAG, "Bench: '$line' failed: ${e.message}")
+        }
+    }
+
+    private suspend fun benchRead(indices: List<Int>, label: String) {
+        transport.write(buildRawReadWrite(readIndices = indices))
+        delay(READ_DELAY_MS)
+        val raw = readPacketOrNull()
+        logger.i(
+            TAG,
+            "Bench $label fields=$indices -> " +
+                (if (raw == null) "no response" else "dataBytes=${raw.payloadSize()} raw=${raw.toHexDump()}"),
+        )
+    }
+
+    private suspend fun benchWrite(index: Int, data: ByteArray) {
+        val packet = buildRawReadWrite(writeIndex = index, writeData = data, readIndices = listOf(index))
+        logger.i(TAG, "Bench write field=$index data=${data.toHexDump()} tx=${packet.toHexDump()}")
+        transport.write(packet)
+        delay(READ_DELAY_MS)
+        val raw = readPacketOrNull()
+        logger.i(
+            TAG,
+            "Bench write field=$index -> " +
+                (if (raw == null) "no response" else "dataBytes=${raw.payloadSize()} raw=${raw.toHexDump()}"),
+        )
     }
 
     /**
@@ -862,6 +982,7 @@ class V1Session(
     private suspend fun pollOnce() = ioMutex.withLock {
         pollOnceLocked()
         if (pollKeypad) pollKeypadOnce()
+        benchTick()
     }
 
     /**
@@ -1246,6 +1367,14 @@ class V1Session(
         // A response is [device, length, command, status, payload..., checksum]: 4 header bytes
         // plus the trailing checksum sit outside the field data. Mirrors V1Codec.HEADER_SIZE.
         private const val V1_HEADER_AND_CHECKSUM = 5
+
+        // A *request* has no status byte, so its overhead is three header bytes plus the checksum.
+        private const val V1_REQUEST_OVERHEAD = 4
+        private const val BENCH_CMD_READ_WRITE_DATA: Byte = 0x02 // mirrors V1Codec's private constant
+        // The app's own external files dir: no storage permission at any API level, writable by
+        // `adb shell`, so the whole sweep runs from the desktop without another build.
+        private const val BENCH_COMMAND_FILE =
+            "/sdcard/Android/data/org.cagnulen.qdomyoszwift/files/fitpro-bench.txt"
         private const val POLL_INTERVAL_MS = 100L
         private const val COMMAND_DELAY_MS = 100L
         private const val READ_DELAY_MS = 0L
