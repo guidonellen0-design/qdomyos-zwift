@@ -74,6 +74,8 @@ class V1Session(
     private var lastFanRaw = -1 // edge-triggered FAN_STATE diagnostic
     private val resistance = ResistanceConverter(deviceInfo.maxResistance)
     private var gearSeen = false // GEAR is authoritative once the board proves it reports it
+    private var gearAddressed = false // bike board that declares GEAR: SetResistance writes GEAR
+    private var lastCommandedGear = -1 // what we last wrote to GEAR; the UI source when gearAddressed
     private var lastBrakeLevel = -1 // RESISTANCE field, kept for diagnostics only
     private val gripHeartRate = GripHeartRateFilter()
 
@@ -354,8 +356,25 @@ class V1Session(
             // display gear (1..MaxGear), so a resistance command has to set the gear too -
             // otherwise ERG and simulated-gradient control from Zwift/MyWhoosh would compute
             // a delta on the gear scale and apply it on the coarser brake scale.
-            if (gearSeen) mapOf(V1DataField.GEAR to command.level.toFloat())
-            else mapOf(V1DataField.RESISTANCE to resistance.levelToRaw(command.level).toFloat())
+            //
+            // [gearSeen] alone is not enough on a board whose GEAR field cannot be polled. The
+            // S22i is that board: GEAR had to be dropped from periodicReadFields because it
+            // corrupted every later field offset (see V1DataField.periodicReadFields and
+            // docs/read-budget.md), so gearSeen can never latch and every SetResistance fell
+            // through to RESISTANCE - which this board silently ignores as a write. Measured
+            // 2026-09-02: with iFIT holding the USB claim, SetGear 1->9->3 was acknowledged in
+            // ~120 ms each (MaxGear=24 == MAX_RESISTANCE_LEVEL), iFIT never wrote RESISTANCE at
+            // all, and on handback QZ read resistance=0 while the machine sat at gear 3. So on a
+            // bike that *declares* GEAR we address the brake by GEAR from the handshake on,
+            // without needing a readback to prove it first.
+            if (gearSeen || gearAddressed) {
+                val maxGear = deviceInfo.maxResistance.takeIf { it > 0 } ?: command.level
+                val gear = command.level.coerceIn(1, maxGear)
+                lastCommandedGear = gear
+                mapOf(V1DataField.GEAR to gear.toFloat())
+            } else {
+                mapOf(V1DataField.RESISTANCE to resistance.levelToRaw(command.level).toFloat())
+            }
         }
         is DeviceCommand.SetIncline -> {
             lastSentGrade = roundToStep(command.percent, deviceInfo.inclineStep)
@@ -401,7 +420,10 @@ class V1Session(
             mapOf(V1DataField.FAN_STATE to command.level.toFloat())
         }
         is DeviceCommand.SetVolume -> mapOf(V1DataField.VOLUME to command.level.toFloat())
-        is DeviceCommand.SetGear -> mapOf(V1DataField.GEAR to command.gear.toFloat())
+        is DeviceCommand.SetGear -> {
+            lastCommandedGear = command.gear
+            mapOf(V1DataField.GEAR to command.gear.toFloat())
+        }
         is DeviceCommand.SetDistanceGoal -> mapOf(V1DataField.DISTANCE_GOAL to command.meters.toFloat())
         is DeviceCommand.SetWarmupTimeout -> mapOf(V1DataField.WARMUP_TIMEOUT to command.seconds.toFloat())
         is DeviceCommand.SetCooldownTimeout -> mapOf(V1DataField.COOLDOWN_TIMEOUT to command.seconds.toFloat())
@@ -432,6 +454,20 @@ class V1Session(
                 "equipmentDeviceId=$equipmentDeviceId, supportedBitFields=${supportedBitFields.size} " +
                 "${supportedBitFields.sorted()}",
         )
+        // A bike whose board declares the GEAR field is gear-addressed: its brake is a 1..MaxGear
+        // selector and RESISTANCE is only a coarse readback. Decide this here rather than waiting
+        // for a polled GEAR value, because on the S22i GEAR cannot be polled at all.
+        gearAddressed = (equipmentDeviceId == V1Message.DEVICE_SPIN_BIKE ||
+            equipmentDeviceId == V1Message.DEVICE_FITNESS_BIKE) &&
+            V1DataField.GEAR.fieldIndex in supportedBitFields
+        if (gearAddressed) {
+            logger.i(
+                TAG,
+                "Gear-addressed bike (equipmentDeviceId=$equipmentDeviceId, GEAR bit " +
+                    "${V1DataField.GEAR.fieldIndex} declared); SetResistance writes GEAR on the " +
+                    "1..${this.deviceInfo.maxResistance} scale",
+            )
+        }
         pollFields = computePollFields(supportedBitFields)
         pollKeypad = supportedBitFields.isEmpty() ||
             V1DataField.KEY_OBJECT.fieldIndex in supportedBitFields
@@ -902,7 +938,8 @@ class V1Session(
                 lastLogTimeMs = now
                 val snap = _exerciseData.value
                 if (snap != null) {
-                    logger.d(TAG, "power=${snap.power}W cadence=${snap.cadence}rpm speed=${snap.speed}kph resistance=${snap.resistance} brake=$lastBrakeLevel gear=$gearSeen incline=${snap.incline}%")
+                    logger.d(TAG, "power=${snap.power}W cadence=${snap.cadence}rpm speed=${snap.speed}kph resistance=${snap.resistance} brake=$lastBrakeLevel gear=$lastCommandedGear "
+                        + "gearSeen=$gearSeen gearAddressed=$gearAddressed incline=${snap.incline}%")
                 }
             }
         }
@@ -946,7 +983,19 @@ class V1Session(
                 }
                 V1DataField.RESISTANCE -> {
                     lastBrakeLevel = resistance.rawToLevel(value.toInt())
-                    if (!gearSeen) accumulator.updateResistance(lastBrakeLevel)
+                    when {
+                        gearSeen -> Unit // GEAR poll already drives the UI
+                        // Gear-addressed board with GEAR unpollable (S22i): the RESISTANCE
+                        // readback sits at 0 no matter where the brake actually is - measured
+                        // 2026-09-02, iFIT left the machine at gear 3 and this field still read
+                        // 0 - so showing it would pin the UI to 0 and make every relative
+                        // adjustment compute its delta from 0. Our own last commanded gear is
+                        // the only truthful source until GEAR can be polled again.
+                        gearAddressed -> if (lastCommandedGear > 0) {
+                            accumulator.updateResistance(lastCommandedGear)
+                        }
+                        else -> accumulator.updateResistance(lastBrakeLevel)
+                    }
                 }
                 V1DataField.ACTUAL_INCLINE -> accumulator.updateIncline(value)
                 V1DataField.GRADE -> accumulator.updateTargetIncline(value)
