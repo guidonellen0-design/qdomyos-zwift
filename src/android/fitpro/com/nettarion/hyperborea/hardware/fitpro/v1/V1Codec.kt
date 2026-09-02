@@ -279,7 +279,31 @@ object V1Codec {
             buf.array()
         }
         V1Converter.KEY_OBJECT -> ByteArray(14)
+        V1Converter.GEAR -> encodeGear(value.toInt())
     }
+
+    /**
+     * Builds the 8-byte [V1DataField.GEAR] write struct for a target gear.
+     *
+     * This is the exact frame measured to work on the NordicTrack S22i: byte 1 is the apply flag
+     * (0 leaves the gear unchanged), byte 4 is the gear itself, and the rest the MCU either derives
+     * or ignores. Roughly twenty-five writes of this shape were accepted with no error and no USB
+     * re-enumeration, against a malformed 1-byte write that knocked the board off the bus every time.
+     *
+     * The gear is clamped to at least 1 on purpose: gear 0 is not "no resistance", it is *invalid*,
+     * and the board answers it by reporting RESISTANCE 10000 — a sentinel above the real full-scale
+     * value of 5980. Never let a 0 reach byte 4.
+     */
+    fun encodeGear(gear: Int): ByteArray = byteArrayOf(
+        0x00,                                  // read-only, ignored on write
+        0x01,                                  // apply this gear (0 = leave unchanged)
+        0x27,                                  // derived by the MCU; echoes back as 0x1E once set
+        0x01,
+        gear.coerceAtLeast(1).toByte(),        // the gear
+        0x07,                                  // gear option, as iFIT sends it
+        0x21,                                  // derived by the MCU from the gear
+        0x19,                                  // MaxGear + 1
+    )
 
     private fun convertFromBytes(field: V1DataField, data: ByteArray): Float = when (field.converter) {
         V1Converter.SPEED -> {
@@ -324,6 +348,8 @@ object V1Codec {
         // KEY_OBJECT is decoded into a KeyObject by decodeDataResponseForFields, not through here;
         // this branch only exists so the `when` stays exhaustive.
         V1Converter.KEY_OBJECT -> 0f
+        // Byte 4 is the commanded gear; the other seven are flags the MCU derives or ignores.
+        V1Converter.GEAR -> if (data.size > 4) (data[4].toInt() and 0xFF).toFloat() else 0f
     }
 
     private fun encodeMultiPacket(data: ByteArray): List<ByteArray> {

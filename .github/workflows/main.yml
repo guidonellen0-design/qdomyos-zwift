@@ -2206,6 +2206,11 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
 
     strategy:
+      # The four variants are independent products; one failing says nothing about the others.
+      # With the default fail-fast, a treadmill-only build race cancelled the finished-in-all-but-
+      # name bike job (run 33644241626), whose own log was clean -- so a cancelled bike job read as
+      # a bike failure and cost a whole rebuild to disprove. Let each variant stand or fall alone.
+      fail-fast: false
       matrix:
         variant:
           - name: treadmill

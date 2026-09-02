@@ -155,7 +155,17 @@ enum class V1DataField(val fieldIndex: Int, val sizeBytes: Int, val converter: V
     CURRENT_TIME(20, 4, V1Converter.INT),
     CURRENT_CALORIES(21, 4, V1Converter.CALORIES),
     GOAL_TIME(22, 4, V1Converter.INT),
-    GEAR(26, 1, V1Converter.BYTE),
+    // 8 bytes, not the 1 the stock table claims. Measured on the NordicTrack S22i 2026-09-02 by
+    // single-field read: `08 0D 02 02 00 00 27 01 01 07 21 19 83` — declared length 13, so 13-5 = 8
+    // data bytes. Declaring 1 is what wedged the board on a GEAR write (the MCU parsed seven bytes
+    // of the following bitmask as gear data) and corrupted every field behind GEAR on a read.
+    // Byte roles, measured by sweeping each one and reading RESISTANCE back:
+    //   0 read-only   1 "apply" flag (0 = leave unchanged)   2 derived   3 constant 01
+    //   4 THE GEAR, 1..MaxGear    5 gear option (07)    6 derived (MaxGear+10 − gear)   7 MaxGear+1
+    // Only byte 4 moves the brake: RESISTANCE = 260 × (gear − 1), exact for gear 1..24, verified
+    // predictively (gear 15 → 3640, gear 19 → 4680, both hit on the nose). Gear 0 is invalid and
+    // makes the board report RESISTANCE 10000, a sentinel well above the in-range maximum of 5980.
+    GEAR(26, 8, V1Converter.GEAR),
     MAX_GRADE(27, 2, V1Converter.GRADE),
     MIN_GRADE(28, 2, V1Converter.GRADE),
     MAX_KPH(30, 2, V1Converter.SPEED),
@@ -230,16 +240,17 @@ enum class V1DataField(val fieldIndex: Int, val sizeBytes: Int, val converter: V
             // and never needs read back, and IS_READY_TO_DISCONNECT still works at
             // teardown, which uses its own single-field read.
             //
-            // GEAR is not polled either, and that is a fix rather than a saving. The
-            // S22i advertises bit 26 but never returned a usable gear: it read a
-            // constant 0 from the day it was added, and the response size stopped
-            // matching the requested shape on that same day. GEAR sits at offset 33,
-            // ahead of FAN_STATE at 47, and every field behind it went stale --
-            // measured 2026-08-31, six console fan-key presses that audibly changed
-            // the fan produced no FAN_STATE change at all, while the fields before
-            // offset 33 (speed, watts, cadence, distance, calories, time) stayed
-            // correct throughout. That is what puts the divergence at GEAR. Do not
-            // re-add it without re-reading docs/read-budget.md.
+            // GEAR is still not polled here, but the reason has changed and the old
+            // one is now known to have been a symptom, not a cause. It used to read a
+            // constant 0 and leave every field behind it stale -- measured 2026-08-31,
+            // six console fan-key presses that audibly changed the fan produced no
+            // FAN_STATE change at all, while every field ahead of GEAR's offset stayed
+            // correct. That was the wrong sizeBytes: GEAR is 8 bytes, was declared 1,
+            // so the decoder walked seven bytes short from GEAR onward. With the width
+            // corrected the corruption is gone, but 8 bytes is a seventh of this
+            // console's ~58-byte response budget, so GEAR gets its own single-field
+            // read in the poll loop instead (see V1Session.pollGearOnce) -- the same
+            // shape KEY_OBJECT already uses, and for the same reason.
             FAN_STATE,
             // Rower data
             STROKES, STROKES_PER_MINUTE,
@@ -265,4 +276,6 @@ enum class V1Converter {
     CALORIES,
     VERTICAL,
     KEY_OBJECT,
+    /** The 8-byte gear struct; see [V1DataField.GEAR]. Decodes to byte 4, encodes into byte 4. */
+    GEAR,
 }

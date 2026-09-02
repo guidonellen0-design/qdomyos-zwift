@@ -75,7 +75,7 @@ class V1Session(
     private var lastFanRaw = -1 // edge-triggered FAN_STATE diagnostic
     private val resistance = ResistanceConverter(deviceInfo.maxResistance)
     private var gearSeen = false // GEAR is authoritative once the board proves it reports it
-    private var gearAddressed = false // bike board that declares GEAR (diagnostic; writes still gated)
+    private var gearAddressed = false // bike board that declares GEAR: brake is addressed by gear
     private var lastCommandedGear = -1 // what we last wrote to GEAR, for the telemetry line
     private var lastBrakeLevel = -1 // RESISTANCE field, kept for diagnostics only
     private val gripHeartRate = GripHeartRateFilter()
@@ -382,9 +382,13 @@ class V1Session(
             // KPH/RESISTANCE at 2 and MAX_RESISTANCE_LEVEL at 1, so the frame is being read right.)
             // A 1-byte write is therefore seven bytes short of the frame the MCU is parsing, and a
             // 1-byte read shifts every field behind it - one cause, both symptoms.
-            // What those 8 bytes *mean* is still unknown, so the write stays gated on a polled
-            // gear; [benchTick] is how the layout gets swept without another build.
-            if (gearSeen) {
+            // 2026-09-02, [benchTick] then swept the eight bytes and the gate comes off: byte 4 is
+            // the gear, an 8-byte write is accepted without ever dropping the board, and
+            // RESISTANCE = 260 x (gear - 1) held on every gear tried. See V1DataField.GEAR.
+            // The gate is now "does the board declare GEAR at all", which is what [gearAddressed]
+            // answers at handshake - so the brake is addressable from the first command, with no
+            // dependency on a readback landing first.
+            if (gearAddressed || gearSeen) {
                 val maxGear = deviceInfo.maxResistance.takeIf { it > 0 } ?: command.level
                 val gear = command.level.coerceIn(1, maxGear)
                 lastCommandedGear = gear
@@ -472,8 +476,9 @@ class V1Session(
                 "${supportedBitFields.sorted()}",
         )
         // A bike whose board declares the GEAR field is gear-addressed: its brake is a 1..MaxGear
-        // selector and RESISTANCE is only a coarse readback. Decide this here rather than waiting
-        // for a polled GEAR value, because on the S22i GEAR cannot be polled at all.
+        // selector and RESISTANCE is only a readback of where that selector put it. Decide it here
+        // rather than waiting for a polled GEAR, so the very first SetResistance already lands on
+        // the brake instead of on a RESISTANCE write this board ignores.
         gearAddressed = (equipmentDeviceId == V1Message.DEVICE_SPIN_BIKE ||
             equipmentDeviceId == V1Message.DEVICE_FITNESS_BIKE) &&
             V1DataField.GEAR.fieldIndex in supportedBitFields
@@ -482,7 +487,8 @@ class V1Session(
                 TAG,
                 "Gear-addressed bike (equipmentDeviceId=$equipmentDeviceId, GEAR bit " +
                     "${V1DataField.GEAR.fieldIndex} declared, MaxGear ${this.deviceInfo.maxResistance}); " +
-                    "the GEAR write is held back until a probe settles the field's real width",
+                    "resistance commands drive GEAR as an 8-byte write, and GEAR is read on its " +
+                    "own single-field poll",
             )
         }
         pollFields = computePollFields(supportedBitFields)
@@ -982,7 +988,30 @@ class V1Session(
     private suspend fun pollOnce() = ioMutex.withLock {
         pollOnceLocked()
         if (pollKeypad) pollKeypadOnce()
+        if (gearAddressed) pollGearOnce()
         benchTick()
+    }
+
+    /**
+     * One GEAR-only read, chasing the main poll inside the same mutex hold — the same shape
+     * [pollKeypadOnce] uses, and for the same reason: GEAR is 8 bytes, which is a seventh of this
+     * console's response budget, and putting it in [pollFields] would push the reply past the size
+     * at which this MCU silently drops the tail.
+     *
+     * This is what lets [gearSeen] latch. Under the old 1-byte declaration GEAR could not be polled
+     * at all without corrupting every field behind it, so the flag could never become true and
+     * every SetResistance fell through to a RESISTANCE write the board ignores. That was the whole
+     * fault: not a missing capability, a wrong field width.
+     */
+    private suspend fun pollGearOnce() {
+        val response = try {
+            sendReadWrite(readFields = GEAR_READ_FIELDS)
+        } catch (e: Exception) {
+            logger.w(TAG, "Gear poll failed: ${e.message}")
+            return
+        }
+        if (response == null || response.status != V1Message.STATUS_DONE) return
+        response.fields[V1DataField.GEAR]?.let { applyDataResponse(mapOf(V1DataField.GEAR to it)) }
     }
 
     /**
@@ -1219,7 +1248,6 @@ class V1Session(
                 V1DataField.IDLE_MODE_LOCKOUT,
                 V1DataField.REQUIRE_START_REQUESTED,
                 V1DataField.VOLUME,
-                V1DataField.GEAR,
                 V1DataField.PAUSE_TIMEOUT,
                 V1DataField.WARMUP_TIMEOUT,
                 V1DataField.COOLDOWN_TIMEOUT,
@@ -1424,5 +1452,6 @@ class V1Session(
         private const val KEY_GEAR_DOWN = 10
 
         private val KEYPAD_READ_FIELDS = setOf(V1DataField.KEY_OBJECT)
+        private val GEAR_READ_FIELDS = setOf(V1DataField.GEAR)
     }
 }
