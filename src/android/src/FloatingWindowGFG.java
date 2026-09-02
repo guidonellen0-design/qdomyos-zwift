@@ -30,6 +30,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.webkit.JavascriptInterface;
 import androidx.constraintlayout.widget.ConstraintLayout;
+import com.rvalerio.fgchecker.AppChecker;
 
 public class FloatingWindowGFG extends Service {
 
@@ -50,12 +51,38 @@ public class FloatingWindowGFG extends Service {
 	 private int originalMargin = 20; // in dp, matching the XML layout
 	 private int reducedMargin = 2;   // minimal margin when not dragging
 
+	 // ---- Foreground-aware visibility ------------------------------------
+	 // The floating window is only wanted on top of a video app. Over QZ
+	 // itself the same metrics are already on screen full size, and over a
+	 // game stream (Moonlight) it is simply in the way. So poll the
+	 // foreground package and hide the window whenever it is not one of the
+	 // video apps.
+	 //
+	 // This needs the PACKAGE_USAGE_STATS appop. Without it the detector
+	 // returns null forever, nothing is ever hidden, and the window behaves
+	 // exactly as it did before - so the feature is safe on a device where
+	 // the appop was never granted.
+	 private static final String[] DEFAULT_VIDEO_PACKAGES = {
+		  "app.morphe.android.youtube",       // ReVanced Extended (Morphe)
+		  "com.google.android.youtube",
+		  "com.google.android.youtube.tv",
+		  "com.liskovsoft.smarttubetv.beta",  // SmartTube
+		  "com.teamsmart.videomanager.tv",
+	 };
+	 private static final int FOREGROUND_POLL_MS = 1000;
+	 private AppChecker appChecker;
+	 private String[] videoPackages = DEFAULT_VIDEO_PACKAGES;
+	 private boolean overlayHidden = false;
+	 private String lastForegroundPackage = null;
+
          // Retrieve the user preference node for the package com.mycompany
          SharedPreferences sharedPreferences;
 
          // Preference key name
          final String PREF_NAME_X = "floatWindowLayoutUpdateParamX";
          final String PREF_NAME_Y = "floatWindowLayoutUpdateParamY";
+         final String PREF_NAME_HIDE_OUTSIDE_VIDEO = "floatWindowHideOutsideVideo";
+         final String PREF_NAME_VIDEO_PACKAGES = "floatWindowVideoPackages";
 
 	 // As FloatingWindowGFG inherits Service class,
 	 // it actually overrides the onBind method
@@ -163,6 +190,8 @@ public class FloatingWindowGFG extends Service {
 		  // added to the WindowManager with all the parameters
 		  windowManager.addView(floatView, floatWindowLayoutParam);
 
+		  startForegroundWatch();
+
 
 		  // Another feature of the floating window is, the window is movable.
 		  // The window can be moved at any position on the screen.
@@ -257,6 +286,7 @@ public class FloatingWindowGFG extends Service {
 	 @Override
 	 public void onDestroy() {
 		  super.onDestroy();
+		  stopForegroundWatch();
 		  stopSelf();
 		  // Window is removed from the screen
 		  windowManager.removeView(floatView);
@@ -287,6 +317,70 @@ public class FloatingWindowGFG extends Service {
 	     
 	     // Schedule timeout for 5 seconds
 	     handler.postDelayed(paddingTimeoutRunnable, 5000);
+	 }
+	 
+	 // Start polling the foreground package. Opt out with the
+	 // floatWindowHideOutsideVideo preference; override the allowlist with a
+	 // comma-separated floatWindowVideoPackages.
+	 private void startForegroundWatch() {
+	     if (!sharedPreferences.getBoolean(PREF_NAME_HIDE_OUTSIDE_VIDEO, true)) {
+	         QLog.d("QZ", "floating window: foreground watch disabled by preference");
+	         return;
+	     }
+
+	     String override = sharedPreferences.getString(PREF_NAME_VIDEO_PACKAGES, null);
+	     if (override != null && override.trim().length() > 0) {
+	         videoPackages = override.trim().split("\\s*,\\s*");
+	     }
+
+	     appChecker = new AppChecker()
+	         .timeout(FOREGROUND_POLL_MS)
+	         .whenAny(new AppChecker.Listener() {
+	             @Override
+	             public void onForeground(String process) {
+	                 onForegroundPackage(process);
+	             }
+	         });
+	     appChecker.start(this);
+	     QLog.d("QZ", "floating window: watching foreground app, " + videoPackages.length + " video package(s)");
+	 }
+	 
+	 private void stopForegroundWatch() {
+	     if (appChecker != null) {
+	         appChecker.stop();
+	         appChecker = null;
+	     }
+	 }
+	 
+	 // Called on the main thread by AppChecker. process is null when the
+	 // foreground app cannot be read at all - almost always a missing
+	 // PACKAGE_USAGE_STATS appop - and then nothing is hidden.
+	 private void onForegroundPackage(String process) {
+	     if (process != null) {
+	         lastForegroundPackage = process;
+	     }
+	     if (lastForegroundPackage == null) {
+	         setOverlayHidden(false);
+	         return;
+	     }
+	     setOverlayHidden(!isVideoPackage(lastForegroundPackage));
+	 }
+	 
+	 private boolean isVideoPackage(String process) {
+	     for (String p : videoPackages) {
+	         if (p.equalsIgnoreCase(process))
+	             return true;
+	     }
+	     return false;
+	 }
+	 
+	 private void setOverlayHidden(boolean hide) {
+	     if (hide == overlayHidden || floatView == null)
+	         return;
+	     overlayHidden = hide;
+	     floatView.setVisibility(hide ? View.GONE : View.VISIBLE);
+	     QLog.d("QZ", "floating window " + (hide ? "hidden" : "shown")
+	            + ", foreground " + lastForegroundPackage);
 	 }
 	 
 	 // Method to expand window height dynamically
