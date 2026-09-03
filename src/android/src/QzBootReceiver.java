@@ -19,6 +19,14 @@ import android.os.SystemClock;
  *
  * The work is handed to AlarmManager because onReceive must return promptly and
  * the receiver's process may be torn down long before the delay elapses.
+ *
+ * QZ only borrows the screen here. It needs the foreground to come up and claim the bike,
+ * but the console is meant to settle on the launcher, not on QZ fullscreen, so the boot
+ * start leaves a marker behind: FloatingWindowGFG reads it when the metrics window opens -
+ * that is, once the bike is connected - and hands the screen back to the launcher. The
+ * marker also covers the other way QZ reaches the foreground at boot, the USB host stack
+ * launching it for the ICON HID interface, because the hand-off keys off the overlay
+ * opening rather than off whatever started QZ.
  */
 public class QzBootReceiver extends BroadcastReceiver {
 
@@ -34,12 +42,29 @@ public class QzBootReceiver extends BroadcastReceiver {
      */
     private static final long START_DELAY_MS = 8_000L;
 
+    /** Shared preferences file carrying the one-shot hand-off marker. */
+    static final String PREFS_NAME = "QzBoot";
+
+    /** elapsedRealtime() at which the boot start was scheduled; absent when nothing is pending. */
+    static final String PREF_HANDOFF_SINCE = "handoffPendingSince";
+
+    /**
+     * How long the marker stays good for. Past this the console is no longer booting: someone is
+     * using it, and opening the overlay by hand must not throw them off the screen they chose.
+     */
+    static final long HANDOFF_WINDOW_MS = 5L * 60_000L;
+
     @Override
     public void onReceive(Context context, Intent intent) {
         final String action = (intent == null) ? null : intent.getAction();
         if (!Intent.ACTION_BOOT_COMPLETED.equals(action)) {
             return;
         }
+
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putLong(PREF_HANDOFF_SINCE, SystemClock.elapsedRealtime())
+                .apply();
 
         final Intent launch = new Intent(context, CustomQtActivity.class);
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);

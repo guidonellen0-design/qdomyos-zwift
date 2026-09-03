@@ -28,6 +28,7 @@ import org.cagnulen.qdomyoszwift.QLog;
 import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.webkit.JavascriptInterface;
 import androidx.constraintlayout.widget.ConstraintLayout;
 import com.rvalerio.fgchecker.AppChecker;
@@ -52,11 +53,12 @@ public class FloatingWindowGFG extends Service {
 	 private int reducedMargin = 2;   // minimal margin when not dragging
 
 	 // ---- Foreground-aware visibility ------------------------------------
-	 // The floating window is only wanted on top of a media app the rider
-	 // watches or listens to while pedalling. Over QZ itself the same metrics
-	 // are already on screen full size, and over a game stream (Moonlight) it
-	 // is simply in the way. So poll the foreground package and hide the
-	 // window whenever it is not one of those apps.
+	 // The floating window is wanted on top of whatever the rider is looking at
+	 // while pedalling - a media app, or the launcher the console rests on
+	 // between apps. Over QZ itself the same metrics are already on screen full
+	 // size, and over a game stream (Moonlight) it is simply in the way. So poll
+	 // the foreground package and hide the window whenever it is not one of the
+	 // apps below.
 	 //
 	 // This needs the PACKAGE_USAGE_STATS appop. Without it the detector
 	 // returns null forever, nothing is ever hidden, and the window behaves
@@ -71,6 +73,9 @@ public class FloatingWindowGFG extends Service {
 		  "com.maxrave.simpmusic",            // SimpMusic - audio, but the
 		                                      // rider is looking at it, and
 		                                      // QZ's own screen is not up
+		  "com.teslacoilsw.launcher",         // Nova - the console rests here
+		                                      // between apps, and metrics on
+		                                      // the home screen are the point
 	 };
 	 private static final int FOREGROUND_POLL_MS = 1000;
 	 private AppChecker appChecker;
@@ -194,6 +199,8 @@ public class FloatingWindowGFG extends Service {
 		  windowManager.addView(floatView, floatWindowLayoutParam);
 
 		  startForegroundWatch();
+
+		  handOffToLauncherIfBootStart();
 
 
 		  // Another feature of the floating window is, the window is movable.
@@ -325,6 +332,39 @@ public class FloatingWindowGFG extends Service {
 	 // Start polling the foreground package. Opt out with the
 	 // floatWindowHideOutsideVideo preference; override the allowlist with a
 	 // comma-separated floatWindowVideoPackages.
+	 /**
+	  * Sends the console to the launcher when QZ was started by the boot receiver rather than by
+	  * the rider. The overlay opening means the bike is connected and the numbers are live, which
+	  * is exactly the moment QZ stops needing the screen: the console should sit on the home
+	  * screen with the metrics window on top of it, one tap from video or a stream.
+	  *
+	  * The marker is one-shot and short-lived, so opening the overlay by hand later in a session
+	  * never moves the rider off the app they chose. If the bike never connects there is no
+	  * overlay and no hand-off, which leaves QZ in front where its own screen can be read.
+	  */
+	 private void handOffToLauncherIfBootStart() {
+		  final SharedPreferences bootPrefs =
+			getSharedPreferences(QzBootReceiver.PREFS_NAME, MODE_PRIVATE);
+		  final long since = bootPrefs.getLong(QzBootReceiver.PREF_HANDOFF_SINCE, -1L);
+		  if (since < 0L) {
+			   return;
+		  }
+		  bootPrefs.edit().remove(QzBootReceiver.PREF_HANDOFF_SINCE).apply();
+
+		  final long age = SystemClock.elapsedRealtime() - since;
+		  if (age > QzBootReceiver.HANDOFF_WINDOW_MS) {
+			   QLog.d("QZ", "floating window: boot hand-off stale after " + (age / 1000)
+				 + "s, leaving the screen alone");
+			   return;
+		  }
+
+		  final Intent home = new Intent(Intent.ACTION_MAIN);
+		  home.addCategory(Intent.CATEGORY_HOME);
+		  home.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+		  startActivity(home);
+		  QLog.d("QZ", "floating window: booted into QZ, handing the screen to the launcher");
+	 }
+
 	 private void startForegroundWatch() {
 	     if (!sharedPreferences.getBoolean(PREF_NAME_HIDE_OUTSIDE_VIDEO, true)) {
 	         QLog.d("QZ", "floating window: foreground watch disabled by preference");
