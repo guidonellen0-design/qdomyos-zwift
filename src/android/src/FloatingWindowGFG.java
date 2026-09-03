@@ -52,11 +52,11 @@ public class FloatingWindowGFG extends Service {
 	 private int reducedMargin = 2;   // minimal margin when not dragging
 
 	 // ---- Foreground-aware visibility ------------------------------------
-	 // The floating window is only wanted on top of a video app. Over QZ
-	 // itself the same metrics are already on screen full size, and over a
-	 // game stream (Moonlight) it is simply in the way. So poll the
-	 // foreground package and hide the window whenever it is not one of the
-	 // video apps.
+	 // The floating window is only wanted on top of a media app the rider
+	 // watches or listens to while pedalling. Over QZ itself the same metrics
+	 // are already on screen full size, and over a game stream (Moonlight) it
+	 // is simply in the way. So poll the foreground package and hide the
+	 // window whenever it is not one of those apps.
 	 //
 	 // This needs the PACKAGE_USAGE_STATS appop. Without it the detector
 	 // returns null forever, nothing is ever hidden, and the window behaves
@@ -68,6 +68,9 @@ public class FloatingWindowGFG extends Service {
 		  "com.google.android.youtube.tv",
 		  "com.liskovsoft.smarttubetv.beta",  // SmartTube
 		  "com.teamsmart.videomanager.tv",
+		  "com.maxrave.simpmusic",            // SimpMusic - audio, but the
+		                                      // rider is looking at it, and
+		                                      // QZ's own screen is not up
 	 };
 	 private static final int FOREGROUND_POLL_MS = 1000;
 	 private AppChecker appChecker;
