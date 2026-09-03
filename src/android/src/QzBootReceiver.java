@@ -23,10 +23,9 @@ import android.os.SystemClock;
  * QZ only borrows the screen here. It needs the foreground to come up and claim the bike,
  * but the console is meant to settle on the launcher, not on QZ fullscreen, so the boot
  * start leaves a marker behind: FloatingWindowGFG reads it when the metrics window opens -
- * that is, once the bike is connected - and hands the screen back to the launcher. The
- * marker also covers the other way QZ reaches the foreground at boot, the USB host stack
- * launching it for the ICON HID interface, because the hand-off keys off the overlay
- * opening rather than off whatever started QZ.
+ * that is, once the bike is connected and the rider has answered the USB permission dialog -
+ * and hands the screen back to the launcher. Keying the hand-off off the overlay rather than
+ * off a timer is what keeps that dialog on screen long enough to be answered.
  */
 public class QzBootReceiver extends BroadcastReceiver {
 
