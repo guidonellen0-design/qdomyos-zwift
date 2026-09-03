@@ -2236,7 +2236,7 @@ jobs:
       - name: Checkout FitPro branch code
         uses: actions/checkout@v3
         with:
-          ref: claude/fervent-newton-a25bb2
+          ref: claude/DESKTOP-AI160B2/workout-watchdog
           token: ${{ secrets.GITHUB_TOKEN }}
           submodules: 'false'  # Prima disattiva il checkout automatico dei submodule
 
