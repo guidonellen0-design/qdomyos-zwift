@@ -133,6 +133,26 @@ class V1Session(
     private var pollKeypad = false
     private var loggedPayloadBaseline = false
 
+    /**
+     * Workout-state watchdog. The console's own state machine leaves RUNNING by itself - its
+     * pause/idle timeout after the rider stops pedalling is enough - and on this controller the
+     * bike's virtual speed field ACTUAL_KPH is only produced while RUNNING. RPM keeps reporting
+     * either way, which is exactly what the failure looks like from the app: cadence moves,
+     * speed sits at 0, and with it distance (QZ integrates distance from speed) and the
+     * estimated power (PowerEstimator is driven by speed, and returns null at 0 kph).
+     *
+     * [transitionToActive] ran once at session start and nothing re-asserted it, so one timeout
+     * left every later ride reading 0 kph until QZ was restarted. Measured on the S22i
+     * 2026-09-02: console in IDLE, 57 rpm -> 0.0 kph 0 W; the same pedalling after re-driving
+     * IDLE -> WARM_UP -> RUNNING by hand -> 11.18 kph 19 W.
+     *
+     * [appRequestedPause] keeps the watchdog from fighting a pause the app asked for: only a
+     * console-initiated drop-out is recovered.
+     */
+    private var appRequestedPause = false
+    private var workoutWatchdogBackoffMs = WORKOUT_WATCHDOG_MIN_BACKOFF_MS
+    private var workoutWatchdogNextAttemptMs = 0L
+
     override suspend fun start() {
         if (_sessionState.value is SessionState.Streaming || _sessionState.value is SessionState.Connecting) return
 
@@ -339,6 +359,11 @@ class V1Session(
         if (_sessionState.value !is SessionState.Streaming) return
 
         logger.i(TAG, "Command requested: ${command::class.simpleName}")
+        when (command) {
+            is DeviceCommand.PauseWorkout, is DeviceCommand.StopWorkout -> appRequestedPause = true
+            is DeviceCommand.ResumeWorkout -> appRequestedPause = false
+            else -> {}
+        }
         if (command is DeviceCommand.StopWorkout && detectedDeviceType.isBeltBased) {
             ioMutex.withLock { stopWorkoutSafely() }
             return
@@ -910,6 +935,39 @@ class V1Session(
         return null
     }
 
+    /**
+     * Re-drives the workout transition when the console has left RUNNING on its own. Costs no
+     * extra bus traffic: WORKOUT_MODE is already in [V1DataField.periodicReadFields], so this
+     * reads the mode the current poll just decoded.
+     *
+     * Only IDLE and PAUSE are recovered - those are what the console's own timeouts produce.
+     * COOL_DOWN is a deliberate end-of-workout state and DMK means the safety key is out;
+     * forcing RUNNING out of either would fight the machine. Belt machines are excluded
+     * outright: on a treadmill a software-written RUNNING is what starts the belt, and
+     * ResumeWorkout remains the only thing allowed to do that.
+     */
+    private suspend fun restoreWorkoutStateIfNeeded() {
+        if (detectedDeviceType.isBeltBased || appRequestedPause) return
+        val mode = accumulator.snapshot().workoutMode?.let { WorkoutMode.fromRaw(it) } ?: return
+        if (mode == WorkoutMode.RUNNING) {
+            workoutWatchdogBackoffMs = WORKOUT_WATCHDOG_MIN_BACKOFF_MS
+            workoutWatchdogNextAttemptMs = 0L
+            return
+        }
+        if (mode != WorkoutMode.IDLE && mode != WorkoutMode.PAUSE) return
+
+        val now = System.currentTimeMillis()
+        if (now < workoutWatchdogNextAttemptMs) return
+        // Claim the next slot before trying, not after: a console that refuses to come back must
+        // cost one attempt a minute, not one per poll tick for the rest of the ride.
+        workoutWatchdogNextAttemptMs = now + workoutWatchdogBackoffMs
+        workoutWatchdogBackoffMs =
+            (workoutWatchdogBackoffMs * 2).coerceAtMost(WORKOUT_WATCHDOG_MAX_BACKOFF_MS)
+
+        logger.i(TAG, "Console left RUNNING (now $mode) - re-driving the workout transition")
+        transitionToActive()
+    }
+
     private fun supportsIdleLockout(): Boolean =
         supportedBitFields.isEmpty() || V1DataField.IDLE_MODE_LOCKOUT.fieldIndex in supportedBitFields
 
@@ -989,6 +1047,7 @@ class V1Session(
         pollOnceLocked()
         if (pollKeypad) pollKeypadOnce()
         if (gearAddressed) pollGearOnce()
+        restoreWorkoutStateIfNeeded()
         benchTick()
     }
 
@@ -1417,6 +1476,13 @@ class V1Session(
         // for up to STATE_CONFIRM_TIMEOUT_MS, before giving up and continuing degraded.
         private const val STATE_CONFIRM_POLL_MS = 150L
         private const val STATE_CONFIRM_TIMEOUT_MS = 5_000L
+
+        // Workout-state watchdog backoff. The first drop-out is recovered on the poll that sees
+        // it; each attempt that does not get the console back to RUNNING doubles the wait, so a
+        // console that is refusing (safety key out, firmware fault) is retried once a minute
+        // instead of ten times a second. Reset as soon as RUNNING is read back.
+        private const val WORKOUT_WATCHDOG_MIN_BACKOFF_MS = 5_000L
+        private const val WORKOUT_WATCHDOG_MAX_BACKOFF_MS = 60_000L
 
         // Teardown: bound how long stop() waits for the poll loop to exit before touching the transport.
         private const val POLL_JOIN_TIMEOUT_MS = 500L
