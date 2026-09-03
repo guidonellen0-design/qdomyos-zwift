@@ -5,6 +5,7 @@ import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.os.Build;
 import android.os.SystemClock;
 
@@ -22,10 +23,16 @@ import android.os.SystemClock;
  *
  * QZ only borrows the screen here. It needs the foreground to come up and claim the bike,
  * but the console is meant to settle on the launcher, not on QZ fullscreen, so the boot
- * start leaves a marker behind: FloatingWindowGFG reads it when the metrics window opens -
- * that is, once the bike is connected and the rider has answered the USB permission dialog -
- * and hands the screen back to the launcher. Keying the hand-off off the overlay rather than
- * off a timer is what keeps that dialog on screen long enough to be answered.
+ * start leaves a marker behind: FitProDeviceService reads it the moment the board is
+ * actually streaming, and hands the screen back to the launcher.
+ *
+ * Keying the hand-off off a live session is what keeps the USB permission dialog on screen
+ * long enough to be answered. An earlier version keyed it off the metrics overlay opening,
+ * on the assumption that the overlay meant a connected bike; it does not. With
+ * floating_startup the overlay opens as QZ starts, about a second before the dialog is even
+ * up, and the ACTION_MAIN/CATEGORY_HOME intent tore that dialog down unanswered - so the
+ * console landed on the launcher with an overlay full of zeroes and no bike (measured on
+ * the S22i 2026-09-03).
  */
 public class QzBootReceiver extends BroadcastReceiver {
 
@@ -42,16 +49,34 @@ public class QzBootReceiver extends BroadcastReceiver {
     private static final long START_DELAY_MS = 8_000L;
 
     /** Shared preferences file carrying the one-shot hand-off marker. */
-    static final String PREFS_NAME = "QzBoot";
+    private static final String PREFS_NAME = "QzBoot";
 
-    /** elapsedRealtime() at which the boot start was scheduled; absent when nothing is pending. */
-    static final String PREF_HANDOFF_SINCE = "handoffPendingSince";
+    /** Set when this boot started QZ; cleared by the first hand-off that acts on it. */
+    private static final String PREF_HANDOFF_PENDING = "handoffPending";
 
     /**
-     * How long the marker stays good for. Past this the console is no longer booting: someone is
-     * using it, and opening the overlay by hand must not throw them off the screen they chose.
+     * Gives the screen back to the launcher if QZ is only on it because this boot put it there.
+     * Called from FitProDeviceService once the board is streaming, which is the first moment the
+     * overlay has real numbers in it and QZ has stopped needing the foreground.
+     *
+     * The marker is one-shot, so a session that drops and reconnects later does not move the
+     * rider off whatever app they had chosen. If the bike never connects the marker is never
+     * consumed and QZ stays in front, where its own screen can be read.
      */
-    static final long HANDOFF_WINDOW_MS = 5L * 60_000L;
+    public static void handOffToLauncherIfBootStart(Context context) {
+        final SharedPreferences bootPrefs =
+                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        if (!bootPrefs.getBoolean(PREF_HANDOFF_PENDING, false)) {
+            return;
+        }
+        bootPrefs.edit().remove(PREF_HANDOFF_PENDING).apply();
+
+        final Intent home = new Intent(Intent.ACTION_MAIN);
+        home.addCategory(Intent.CATEGORY_HOME);
+        home.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        context.startActivity(home);
+        QLog.d(TAG, "bike connected after a boot start, handing the screen to the launcher");
+    }
 
     @Override
     public void onReceive(Context context, Intent intent) {
@@ -62,7 +87,7 @@ public class QzBootReceiver extends BroadcastReceiver {
 
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
-                .putLong(PREF_HANDOFF_SINCE, SystemClock.elapsedRealtime())
+                .putBoolean(PREF_HANDOFF_PENDING, true)
                 .apply();
 
         final Intent launch = new Intent(context, CustomQtActivity.class);

@@ -225,6 +225,15 @@ object FitProDeviceService {
             permissionDeclined = false
             QLog.i(TAG, "FitPro session streaming (protocol=${if (protocolIsV1) "V1" else "V2"})")
 
+            // A boot start only borrows the screen: now that the board is streaming, the console
+            // should settle on the launcher with the metrics overlay on top of it. No-op unless
+            // this boot is the reason QZ is in the foreground.
+            try {
+                QzBootReceiver.handOffToLauncherIfBootStart(ctx)
+            } catch (e: Throwable) {
+                QLog.w(TAG, "boot hand-off to launcher failed: ${e.message}")
+            }
+
             collectJob = scope.launch {
                 newSession.exerciseData.collect { data ->
                     if (data != null) {

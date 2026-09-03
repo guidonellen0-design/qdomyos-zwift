@@ -28,7 +28,6 @@ import org.cagnulen.qdomyoszwift.QLog;
 import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.SystemClock;
 import android.webkit.JavascriptInterface;
 import androidx.constraintlayout.widget.ConstraintLayout;
 import com.rvalerio.fgchecker.AppChecker;
@@ -200,8 +199,6 @@ public class FloatingWindowGFG extends Service {
 
 		  startForegroundWatch();
 
-		  handOffToLauncherIfBootStart();
-
 
 		  // Another feature of the floating window is, the window is movable.
 		  // The window can be moved at any position on the screen.
@@ -332,39 +329,6 @@ public class FloatingWindowGFG extends Service {
 	 // Start polling the foreground package. Opt out with the
 	 // floatWindowHideOutsideVideo preference; override the allowlist with a
 	 // comma-separated floatWindowVideoPackages.
-	 /**
-	  * Sends the console to the launcher when QZ was started by the boot receiver rather than by
-	  * the rider. The overlay opening means the bike is connected and the numbers are live, which
-	  * is exactly the moment QZ stops needing the screen: the console should sit on the home
-	  * screen with the metrics window on top of it, one tap from video or a stream.
-	  *
-	  * The marker is one-shot and short-lived, so opening the overlay by hand later in a session
-	  * never moves the rider off the app they chose. If the bike never connects there is no
-	  * overlay and no hand-off, which leaves QZ in front where its own screen can be read.
-	  */
-	 private void handOffToLauncherIfBootStart() {
-		  final SharedPreferences bootPrefs =
-			getSharedPreferences(QzBootReceiver.PREFS_NAME, MODE_PRIVATE);
-		  final long since = bootPrefs.getLong(QzBootReceiver.PREF_HANDOFF_SINCE, -1L);
-		  if (since < 0L) {
-			   return;
-		  }
-		  bootPrefs.edit().remove(QzBootReceiver.PREF_HANDOFF_SINCE).apply();
-
-		  final long age = SystemClock.elapsedRealtime() - since;
-		  if (age > QzBootReceiver.HANDOFF_WINDOW_MS) {
-			   QLog.d("QZ", "floating window: boot hand-off stale after " + (age / 1000)
-				 + "s, leaving the screen alone");
-			   return;
-		  }
-
-		  final Intent home = new Intent(Intent.ACTION_MAIN);
-		  home.addCategory(Intent.CATEGORY_HOME);
-		  home.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-		  startActivity(home);
-		  QLog.d("QZ", "floating window: booted into QZ, handing the screen to the launcher");
-	 }
-
 	 private void startForegroundWatch() {
 	     if (!sharedPreferences.getBoolean(PREF_NAME_HIDE_OUTSIDE_VIDEO, true)) {
 	         QLog.d("QZ", "floating window: foreground watch disabled by preference");
