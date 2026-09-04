@@ -28,12 +28,31 @@ import com.nettarion.hyperborea.core.model.ExerciseData
  *
  * Auto-refront happens ONLY while our own attract screen is active, so QZ never fights a user who
  * deliberately opened some other app while riding.
+ *
+ * A game stream is the one deliberately opened app that does get interrupted, because leaving it
+ * running costs something at the other end: Moonlight's Game activity stops the connection in its
+ * own onStop(), so fronting the launcher over it is a clean disconnect. QZ cannot see touches
+ * inside that stream — the overlay is hidden over it and gets no events — so pedalling is the only
+ * activity signal there is, and the timeout is split accordingly: [STREAM_IDLE_TIMEOUT_MS] once
+ * the rider has actually pedalled during this stint, and the much longer
+ * [STREAM_UNRIDDEN_TIMEOUT_MS] before that. Choosing a route in MyWhoosh through the stream takes
+ * minutes with the pedals still, and cutting the stream out from under that would be worse than
+ * leaving it up.
  */
 object IdleAttract {
 
     private const val TAG = "IdleAttract"
     private const val IDLE_TIMEOUT_MS = 10 * 60_000L
     private const val REFRONT_COOLDOWN_MS = 15_000L
+
+    /** No pedalling for this long in a game stream the rider has already ridden — disconnect. */
+    private const val STREAM_IDLE_TIMEOUT_MS = 5 * 60_000L
+
+    /** Same, for a stream nobody has pedalled in yet: long enough to set a ride up in. */
+    private const val STREAM_UNRIDDEN_TIMEOUT_MS = 20 * 60_000L
+
+    /** Apps whose foreground activity is a live remote stream. Moonlight is the only one here. */
+    private val STREAM_PACKAGES = setOf("com.limelight")
 
     @Volatile private var qzResumed = false
     @Volatile private var attractActive = false
@@ -47,6 +66,11 @@ object IdleAttract {
     @Volatile private var attractOrigin: String? = null
 
     @Volatile private var cachedHomePackage: String? = null
+
+    /** Whether the pedals have turned since the current foreground app took the screen. */
+    @Volatile private var pedalledInFront = false
+
+    @Volatile private var lastStreamStopMs = 0L
 
     @JvmStatic
     fun onQzResumed() {
@@ -74,6 +98,9 @@ object IdleAttract {
     fun onForegroundPackage(pkg: String?) {
         if (pkg != frontPackage) {
             frontPackage = pkg
+            // A new app in front is a new stint: whether the rider pedalled in the last one says
+            // nothing about this one, and a stream just opened has not been ridden in yet.
+            pedalledInFront = false
             if (pkg != null) {
                 lastActiveMs = SystemClock.elapsedRealtime()
             }
@@ -98,10 +125,20 @@ object IdleAttract {
         val pedalling = (data.speed ?: 0f) > 0.5f || (data.cadence ?: 0) > 5
         if (pedalling) {
             lastActiveMs = now
+            pedalledInFront = true
             if (attractActive && !qzResumed && now - lastFrontAttemptMs > REFRONT_COOLDOWN_MS) {
                 lastFrontAttemptMs = now
                 val target = attractOrigin ?: ctx.packageName
                 front(ctx, target, "pedalling resumed — fronting $target")
+            }
+            return
+        }
+        val frontNow = frontPackage
+        if (frontNow != null && frontNow in STREAM_PACKAGES) {
+            val timeout = if (pedalledInFront) STREAM_IDLE_TIMEOUT_MS else STREAM_UNRIDDEN_TIMEOUT_MS
+            if (now - lastActiveMs > timeout && now - lastStreamStopMs > REFRONT_COOLDOWN_MS) {
+                lastStreamStopMs = now
+                stopStream(ctx, frontNow, timeout)
             }
             return
         }
@@ -156,6 +193,18 @@ object IdleAttract {
             attractActive = false
             attractOrigin = null
         }
+    }
+
+    /**
+     * End an idle game stream by putting the launcher in front of it. There is no API to ask
+     * Moonlight to disconnect, and QZ cannot force-stop another app without root — but it does not
+     * need to: losing the foreground is what Moonlight itself treats as "stop the connection".
+     * The launcher is the target so the console lands where it rests between rides; if no home is
+     * resolvable, QZ's own screen does the same job.
+     */
+    private fun stopStream(ctx: Context, streamPkg: String, timeoutMs: Long) {
+        val target = homePackageOf(ctx) ?: ctx.packageName
+        front(ctx, target, "no pedalling for ${timeoutMs / 60_000} min in $streamPkg — fronting $target to end the stream")
     }
 
     private fun front(ctx: Context, pkg: String, why: String) {
