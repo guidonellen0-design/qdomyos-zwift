@@ -148,6 +148,64 @@ void proformtreadmill::forceSpeed(double speed) {
     writeCharacteristic(write, sizeof(write), forceSpeedLabel, false, true);
 }
 
+/* The ProForm Trainer 8.7 discards a setpoint from any client that has not
+ * claimed control of it. The real iFIT app claims with a single 09-family
+ * frame, holds the claim with an 08-family heartbeat about once a second, and
+ * releases it on stop; QZ sent none of the three, which is why its speed and
+ * incline frames -- which are byte-for-byte correct -- were ignored. Decoded
+ * from two Bluetooth HCI snoop captures of iFIT 3.20.15 driving this exact
+ * machine, 2026-09-04. The frames below are transcribed from those captures. */
+
+void proformtreadmill::claimControl() {
+    uint8_t noOpData7[] = {0xfe, 0x02, 0x0d, 0x02};
+    uint8_t write[] = {0xff, 0x0d, 0x02, 0x04, 0x02, 0x09, 0x04, 0x09, 0x02, 0x02, 0x00, 0x10, 0x02, 0x00, 0x00};
+
+    // byte 12 is a state, not a nonce: 0x02 claims from a standstill, 0x0d
+    // re-claims after the machine has stopped itself. iFIT sends both, and the
+    // second only while it still believes it holds the claim.
+    write[12] = controlClaimed ? 0x0d : 0x02;
+
+    // the same checksum expression forceSpeed() already uses for this profile:
+    // A + B + C + D + 0x0f over payload bytes 9-12, which for a control frame
+    // reduces to write[11] + write[12] + 0x11. Gives 0x23 and 0x2e, both
+    // matching the capture.
+    write[14] = write[11] + write[12] + 0x11;
+
+    writeCharacteristic(noOpData7, sizeof(noOpData7), QStringLiteral("claimControl"));
+    writeCharacteristic(write, sizeof(write), QStringLiteral("claimControl"), false, true);
+
+    controlClaimed = true;
+}
+
+void proformtreadmill::controlHeartbeat() {
+    uint8_t noOpData8[] = {0xfe, 0x02, 0x0c, 0x02};
+    // Sent as a literal. The 08 family does not follow the 09 checksum rule:
+    // 0x00 + 0x02 + 0x00 + 0x10 + 0x0f is 0x21, but the observed byte is 0x20.
+    uint8_t write[] = {0xff, 0x0c, 0x02, 0x04, 0x02, 0x08, 0x04, 0x08, 0x02, 0x00, 0x02, 0x00, 0x10, 0x20};
+
+    // not logged: this goes out about once a second for the whole workout.
+    writeCharacteristic(noOpData8, sizeof(noOpData8), QStringLiteral("controlHeartbeat"), true);
+    writeCharacteristic(write, sizeof(write), QStringLiteral("controlHeartbeat"), true);
+}
+
+void proformtreadmill::releaseControl() {
+    uint8_t noOpData8[] = {0xfe, 0x02, 0x0c, 0x02};
+    // iFIT precedes the release with this 08-family teardown frame. Literal,
+    // for the same reason as the heartbeat.
+    uint8_t teardown[] = {0xff, 0x0c, 0x02, 0x04, 0x02, 0x08, 0x04, 0x08, 0x02, 0x00, 0x02, 0x00, 0x02, 0x12};
+    uint8_t noOpData7[] = {0xfe, 0x02, 0x0d, 0x02};
+    uint8_t write[] = {0xff, 0x0d, 0x02, 0x04, 0x02, 0x09, 0x04, 0x09, 0x02, 0x02, 0x00, 0x10, 0x01, 0x00, 0x00};
+
+    write[14] = write[11] + write[12] + 0x11; // 0x22
+
+    writeCharacteristic(noOpData8, sizeof(noOpData8), QStringLiteral("releaseControl"));
+    writeCharacteristic(teardown, sizeof(teardown), QStringLiteral("releaseControl"));
+    writeCharacteristic(noOpData7, sizeof(noOpData7), QStringLiteral("releaseControl"));
+    writeCharacteristic(write, sizeof(write), QStringLiteral("releaseControl"), false, true);
+
+    controlClaimed = false;
+}
+
 void proformtreadmill::update() {
     if (m_control->state() == QLowEnergyController::UnconnectedState) {
         emit disconnected();
@@ -2906,6 +2964,14 @@ void proformtreadmill::update() {
                 writeCharacteristic(noOpData3, sizeof(noOpData3), QStringLiteral("noOp"));
                 break;
             case 3:
+                // Hold the control claim. This sits between two complete
+                // messages -- cases 0-2 carry one fragmented message and 3-5
+                // the next -- so it cannot break either one's reassembly. One
+                // send per poll cycle is ~1.2 s, inside iFIT's observed
+                // 1.0-1.31 s.
+                if (controlClaimed) {
+                    controlHeartbeat();
+                }
                 writeCharacteristic(noOpData4, sizeof(noOpData4), QStringLiteral("noOp"), false, true);
                 break;
             case 4:
@@ -2933,14 +2999,20 @@ void proformtreadmill::update() {
                 if (requestStart != -1) {
                     emit debug(QStringLiteral("starting..."));
 
-                           // btinit();
+                    // The claim is also the start: in the capture the belt
+                    // moved 0.45 s after this frame and 41 s before any speed
+                    // command, from a standstill. QZ's five-frame start
+                    // sequence is deliberately not sent -- it was tried on this
+                    // machine, under all 15 profiles that transmit one, and it
+                    // does nothing.
+                    claimControl();
 
                     requestStart = -1;
                     emit tapeStarted();
                 }
                 if (requestStop != -1) {
                     emit debug(QStringLiteral("stopping..."));
-                    // writeCharacteristic(initDataF0C800B8, sizeof(initDataF0C800B8), "stop tape");
+                    releaseControl();
                     requestStop = -1;
                 }
                 break;
@@ -3980,6 +4052,9 @@ void proformtreadmill::characteristicChanged(const QLowEnergyCharacteristic &cha
 }
 
 void proformtreadmill::btinit() {
+    // a new connection holds no claim, whatever the last one did
+    controlClaimed = false;
+
 #ifdef Q_OS_WIN
     const int sleepms = 600;
 #else

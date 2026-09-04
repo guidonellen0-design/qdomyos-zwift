@@ -49,6 +49,9 @@ class proformtreadmill : public treadmill {
     void sendPoll();
     void forceIncline(double incline);
     void forceSpeed(double speed);
+    void claimControl();
+    void releaseControl();
+    void controlHeartbeat();
 
     QTimer *refresh;
     uint8_t counterPoll = 0;
@@ -67,6 +70,7 @@ class proformtreadmill : public treadmill {
     bool initRequest = false;
     double maxSpeed = 22;
     double cachedSpeedRequest = -1;
+    bool controlClaimed = false;
 
     bool noWriteResistance = false;
     bool noHeartService = false;
