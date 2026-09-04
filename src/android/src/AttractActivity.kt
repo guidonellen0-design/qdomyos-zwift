@@ -188,6 +188,10 @@ class AttractActivity : Activity() {
     override fun onDestroy() {
         stopped = true
         handler.removeCallbacksAndMessages(null)
+        // Release IdleAttract's latch. QZ resuming used to be the only thing that cleared it,
+        // which is wrong now that the console rests on the launcher: a slideshow dismissed there
+        // would otherwise be the last one this process ever showed.
+        IdleAttract.onAttractFinished()
         super.onDestroy()
     }
 

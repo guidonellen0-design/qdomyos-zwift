@@ -357,12 +357,19 @@ public class FloatingWindowGFG extends Service {
 	         appChecker.stop();
 	         appChecker = null;
 	     }
+	     // The screensaver reads the foreground app from this watch; with the watch gone it must
+	     // fall back to its own QZ-resumed signal rather than act on a stale package.
+	     IdleAttract.onForegroundPackage(null);
 	 }
 	 
 	 // Called on the main thread by AppChecker. process is null when the
 	 // foreground app cannot be read at all - almost always a missing
 	 // PACKAGE_USAGE_STATS appop - and then nothing is hidden.
 	 private void onForegroundPackage(String process) {
+	     // The idle screensaver needs the same reading to tell a resting console (QZ or the
+	     // launcher in front) from an app the rider deliberately opened. Pass the raw value:
+	     // unlike the overlay, it must not act on a stale package.
+	     IdleAttract.onForegroundPackage(process);
 	     if (process != null) {
 	         lastForegroundPackage = process;
 	     }
