@@ -202,6 +202,19 @@ void proformtreadmill::controlHeartbeat() {
 }
 
 void proformtreadmill::releaseControl() {
+    // Stop the belt before giving up the claim. Releasing control does not stop
+    // the machine: measured 2026-09-04, QZ's Stop sent the teardown and release
+    // frames, the machine acknowledged both, and the belt stayed at 2.00 km/h
+    // for minutes afterwards -- it keeps whatever speed was last commanded. A
+    // setpoint is only honoured while the claim is held, so speed 0 has to go
+    // out first, and any pending request has to be dropped so update() does not
+    // immediately command a speed back into a released session.
+    if (controlClaimed) {
+        forceSpeed(0);
+    }
+    requestSpeed = -1;
+    cachedSpeedRequest = -1;
+
     uint8_t noOpData8[] = {0xfe, 0x02, 0x0c, 0x02};
     // iFIT precedes the release with this 08-family teardown frame. Literal,
     // for the same reason as the heartbeat.
