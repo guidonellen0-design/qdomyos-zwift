@@ -5468,8 +5468,18 @@ void homeform::pelotonOffset_Plus() { Plus(QStringLiteral("peloton_offset")); }
 void homeform::pelotonOffset_Minus() { Minus(QStringLiteral("peloton_offset")); }
 
 void homeform::bluetoothDeviceConnected(bluetoothdevice *b) {
-    this->innerTemplateManager->start(b);
-    this->userTemplateManager->start(b);
+    // The templates - the floating overlay and the web UI among them - must describe the
+    // same machine the rest of QZ is using. TemplateInfoSenderBuilder::start() binds them
+    // to one device pointer and never rebinds, so taking b here hands the feed to whichever
+    // object connected last. When discovery matches a second machine (an iFIT treadmill in
+    // radio range, with filter_device disabled) the overlay switches to it and shows its
+    // zeros, while QZ's own screen keeps reading bluetoothManager->device() and stays right.
+    // bluetoothManager->device() is that one authority; fall back to b before it exists.
+    bluetoothdevice *current = bluetoothManager ? bluetoothManager->device() : nullptr;
+    if (!current)
+        current = b;
+    this->innerTemplateManager->start(current);
+    this->userTemplateManager->start(current);
 #ifndef Q_OS_IOS
     // heart rate received from apple watch while QZ is running on a different device via TCP socket (iphone_socket)
     connect(this, SIGNAL(heartRate(uint8_t)), b, SLOT(heartRate(uint8_t)));
