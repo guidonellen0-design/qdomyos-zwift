@@ -29,15 +29,20 @@ import com.nettarion.hyperborea.core.model.ExerciseData
  * Auto-refront happens ONLY while our own attract screen is active, so QZ never fights a user who
  * deliberately opened some other app while riding.
  *
- * A game stream is the one deliberately opened app that does get interrupted, because leaving it
- * running costs something at the other end: Moonlight's Game activity stops the connection in its
- * own onStop(), so fronting the launcher over it is a clean disconnect. QZ cannot see touches
- * inside that stream — the overlay is hidden over it and gets no events — so pedalling is the only
- * activity signal there is, and the timeout is split accordingly: [STREAM_IDLE_TIMEOUT_MS] once
- * the rider has actually pedalled during this stint, and the much longer
- * [STREAM_UNRIDDEN_TIMEOUT_MS] before that. Choosing a route in MyWhoosh through the stream takes
- * minutes with the pedals still, and cutting the stream out from under that would be worse than
- * leaving it up.
+ * A deliberately opened app does still time out, it just gets a different clock. QZ cannot see
+ * touches inside another app — the overlay is hidden over it and receives no events — so pedalling
+ * is the only activity signal there is, and it is read in two grades: [FOREGROUND_IDLE_TIMEOUT_MS]
+ * once the rider has actually pedalled during this stint, and the much longer
+ * [FOREGROUND_UNRIDDEN_TIMEOUT_MS] before that. Choosing a route in MyWhoosh through a game stream
+ * takes minutes with the pedals still, and cutting that short would be worse than leaving it up.
+ * When the clock does run out the slideshow takes the screen, the same as over the launcher: a
+ * YouTube video left playing to an empty room all day is exactly what this is for (S22i,
+ * 2026-09-04).
+ *
+ * A game stream additionally gets the launcher put in front of it, because leaving it running
+ * costs something at the other end: Moonlight's Game activity stops the connection in its own
+ * onStop(). The slideshow alone would do that too, but landing the launcher underneath means
+ * dismissing the slideshow leaves the console where it rests rather than in a dead stream.
  */
 object IdleAttract {
 
@@ -45,11 +50,11 @@ object IdleAttract {
     private const val IDLE_TIMEOUT_MS = 10 * 60_000L
     private const val REFRONT_COOLDOWN_MS = 15_000L
 
-    /** No pedalling for this long in a game stream the rider has already ridden — disconnect. */
-    private const val STREAM_IDLE_TIMEOUT_MS = 5 * 60_000L
+    /** No pedalling for this long in an app the rider has already ridden in — nobody is here. */
+    private const val FOREGROUND_IDLE_TIMEOUT_MS = 5 * 60_000L
 
-    /** Same, for a stream nobody has pedalled in yet: long enough to set a ride up in. */
-    private const val STREAM_UNRIDDEN_TIMEOUT_MS = 20 * 60_000L
+    /** Same, for an app nobody has pedalled in yet: long enough to set a ride up in. */
+    private const val FOREGROUND_UNRIDDEN_TIMEOUT_MS = 20 * 60_000L
 
     /** Apps whose foreground activity is a live remote stream. Moonlight is the only one here. */
     private val STREAM_PACKAGES = setOf("com.limelight")
@@ -134,18 +139,29 @@ object IdleAttract {
             return
         }
         val frontNow = frontPackage
-        if (frontNow != null && frontNow in STREAM_PACKAGES) {
-            val timeout = if (pedalledInFront) STREAM_IDLE_TIMEOUT_MS else STREAM_UNRIDDEN_TIMEOUT_MS
-            if (now - lastActiveMs > timeout && now - lastStreamStopMs > REFRONT_COOLDOWN_MS) {
+        if (frontNow != null && !resting(ctx)) {
+            val timeout =
+                if (pedalledInFront) FOREGROUND_IDLE_TIMEOUT_MS else FOREGROUND_UNRIDDEN_TIMEOUT_MS
+            if (now - lastActiveMs <= timeout) return
+            if (frontNow in STREAM_PACKAGES && now - lastStreamStopMs > REFRONT_COOLDOWN_MS) {
                 lastStreamStopMs = now
                 stopStream(ctx, frontNow, timeout)
+            }
+            if (!attractActive) {
+                attractActive = true
+                // Pedalling brings back what the rider left, except a stream: reconnecting the
+                // one we just cut is the opposite of what the timeout was for.
+                attractOrigin =
+                    if (frontNow in STREAM_PACKAGES) (homePackageOf(ctx) ?: ctx.packageName)
+                    else frontNow
+                startAttract(ctx, timeout)
             }
             return
         }
         if (resting(ctx) && !attractActive && now - lastActiveMs > IDLE_TIMEOUT_MS) {
             attractActive = true
             attractOrigin = if (qzResumed) ctx.packageName else frontPackage
-            startAttract(ctx)
+            startAttract(ctx, IDLE_TIMEOUT_MS)
         }
     }
 
@@ -180,8 +196,8 @@ object IdleAttract {
         return pkg
     }
 
-    private fun startAttract(ctx: Context) {
-        QLog.i(TAG, "idle ${IDLE_TIMEOUT_MS / 60_000} min over ${attractOrigin ?: "QZ"} — starting attract slideshow")
+    private fun startAttract(ctx: Context, timeoutMs: Long) {
+        QLog.i(TAG, "idle ${timeoutMs / 60_000} min over ${frontPackage ?: "QZ"} — starting attract slideshow")
         // Its own task, not ours: fronting QZ later must cover the slideshow rather than land
         // behind it, and the slideshow must never be what the rider finds on top of QZ's task.
         val intent = Intent(ctx, AttractActivity::class.java)
