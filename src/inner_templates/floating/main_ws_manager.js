@@ -1,6 +1,56 @@
 let main_ws = null;
 let main_ws_queue = [];
 
+// A socket can be open and still be dead: the server keeps its own list of clients to broadcast
+// to, and a socket that never makes it onto that list - or is dropped from it - stays connected at
+// the TCP level with nothing ever arriving. onclose never fires, so the reconnect below never
+// runs, and the page sits there showing whatever numbers it last had. Observed on the S22i
+// console: the floating overlay held a stale resistance for several minutes while QZ's own screen
+// was live, and a second socket opened to the same URL received data immediately.
+//
+// Two shapes, two detections. A socket that never delivers anything is caught where the page's
+// opening request times out (see main_ws_reconnect_if_silent). One that delivers and then stops is
+// caught here.
+const MAIN_WS_STALE_MS = 30000;
+const MAIN_WS_WATCHDOG_MS = 5000;
+let main_ws_rx = 0;
+let main_ws_last_data = 0;
+
+function main_ws_force_reconnect(why) {
+    let dead = main_ws;
+    if (!dead) return;
+    console.log('WS ' + why + ' - closing the socket to force a reconnect');
+    main_ws_last_data = 0;
+    try {
+        dead.close();
+    } catch (e) {
+        console.error('WS close failed: ' + e);
+    }
+    // close() on a socket the server has forgotten may never produce a close event, and the
+    // reconnect hangs off that event. Give it a moment, then reconnect regardless.
+    setTimeout(function () {
+        if (main_ws === dead) {
+            main_ws = null;
+            main_ws_connect();
+        }
+    }, 3000);
+}
+
+/** Reconnect only if this socket has never delivered a single message. */
+function main_ws_reconnect_if_silent(why) {
+    if (main_ws && main_ws.readyState === 1 && main_ws_rx === 0)
+        main_ws_force_reconnect(why);
+}
+
+setInterval(function () {
+    // Armed by the first workout broadcast only: before that there may legitimately be nothing to
+    // send (no device connected yet), and reconnecting on that would just churn.
+    if (main_ws && main_ws.readyState === 1 && main_ws_last_data &&
+        Date.now() - main_ws_last_data > MAIN_WS_STALE_MS) {
+        main_ws_force_reconnect('no data for ' + (MAIN_WS_STALE_MS / 1000) + 's');
+    }
+}, MAIN_WS_WATCHDOG_MS);
+
 class MainWSQueueElement {
     constructor(msg_to_send, _inner_process, timeout, retry_num) {
         this.msg_to_send = msg_to_send;
@@ -108,9 +158,17 @@ function main_ws_connect() {
     socket.onopen = function (event) {
         console.log('Upgrade HTTP connection OK');
         main_ws = socket;
+        main_ws_rx = 0;
+        main_ws_last_data = 0;
         main_ws_queue_process();
     };
     socket.onclose = function(e) {
+        // A late close event from a socket we already replaced must not tear down the live one,
+        // nor start a second reconnect chain alongside it.
+        if (main_ws !== socket && main_ws !== null) {
+            console.log('Socket closed after being replaced - ignoring.', e.reason);
+            return;
+        }
         main_ws = null;
         console.log('Socket is closed. Reconnect will be attempted in 30 second.', e.reason);
         setTimeout(function() {
@@ -119,13 +177,17 @@ function main_ws_connect() {
     };
 
     socket.onerror = function(err) {
-        main_ws = null;
         console.error('Socket encountered error: ', err.message, 'Closing socket');
+        if (main_ws === socket)
+            main_ws = null;
         socket.close();
     };
     socket.onmessage = function (event) {
         console.log(event.data);
+        main_ws_rx++;
         let msg = JSON.parse(event.data);
+        if (msg && msg.msg === 'workout')
+            main_ws_last_data = Date.now();
         main_ws_queue_process(msg);
     };
 }

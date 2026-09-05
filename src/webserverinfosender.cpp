@@ -67,13 +67,16 @@ bool WebServerInfoSender::send(const QString &data) {
 }
 
 void WebServerInfoSender::innerStop() {
+    // Closing the sockets, not just forgetting them. Dropping a client from the lists while its
+    // connection is still up leaves the page at the other end with an open socket that will never
+    // receive anything and will never see a close event either, so its reconnect logic never
+    // fires and it displays stale numbers indefinitely. Closing gives it the event it needs.
+    closeAllSockets();
+
     if (innerTcpServer) {
         if (isRunning())
             innerTcpServer->close();
         httpServer->deleteLater();
-        clients.clear();
-        sendToClients.clear();
-        reply2Req.clear();
         innerTcpServer = 0;
         httpServer = 0;
     }
@@ -83,6 +86,26 @@ void WebServerInfoSender::innerStop() {
     clients.clear();
     sendToClients.clear();
     reply2Req.clear();
+}
+
+void WebServerInfoSender::closeAllSockets() {
+    QList<QPointer<QWebSocket>> toClose;
+    {
+        QMutexLocker locker(&clientsMutex);
+        toClose = clients;
+        clients.clear();
+        sendToClients.clear();
+    }
+    // Outside the lock, and with the disconnect handler detached first: close() can deliver
+    // disconnected() straight away, and that slot takes the same non-recursive mutex.
+    for (auto &c : toClose) {
+        if (c.isNull())
+            continue;
+        QWebSocket *s = c.data();
+        disconnect(s, SIGNAL(disconnected()), this, SLOT(socketDisconnected()));
+        s->close();
+        s->deleteLater();
+    }
 }
 
 bool WebServerInfoSender::init() {
@@ -123,10 +146,14 @@ bool WebServerInfoSender::init() {
                                   });
             }
         }
+        // Connected before listening, not after: a client that gets in between the two would be
+        // upgraded and left sitting in the pending queue with nobody to collect it, and a
+        // collected-by-nobody socket is open forever with nothing ever sent to it.
+        connect(httpServer, SIGNAL(newWebSocketConnection()), this, SLOT(onNewConnection()),
+                Qt::UniqueConnection);
         if (listen()) {
             qDebug() << QStringLiteral("WebServer listening on port") << port << QStringLiteral(" ")
                      << relative2Absolute;
-            connect(httpServer, SIGNAL(newWebSocketConnection()), this, SLOT(onNewConnection()));
             return true;
         } else {
             reinit();
@@ -236,12 +263,20 @@ void WebServerInfoSender::processFetcher(QWebSocket *sender, const QByteArray &d
 }
 
 void WebServerInfoSender::onNewConnection() {
-    QWebSocket *pSocket = httpServer->nextPendingWebSocketConnection();
+    // Drained in a loop rather than one per signal: one missed or coalesced emission would
+    // otherwise strand a fully upgraded socket in the pending queue permanently, and the page on
+    // the other end has no way to tell that from a working connection.
+    QWebSocket *pSocket;
+    while ((pSocket = httpServer->nextPendingWebSocketConnection()))
+        registerWebSocket(pSocket);
+}
+
+void WebServerInfoSender::registerWebSocket(QWebSocket *pSocket) {
     QUrl requestUrl = pSocket->requestUrl();
     qDebug() << QStringLiteral("WebSocket connection") << requestUrl;
 
     QMutexLocker locker(&clientsMutex);
-    
+
     // Handle different types of WebSocket connections based on the path
     if (requestUrl.path() == QStringLiteral("/fetcher")) {
         connect(pSocket, SIGNAL(textMessageReceived(QString)), this, SLOT(processFetcherRequest(QString)));
