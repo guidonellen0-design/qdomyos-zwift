@@ -77,6 +77,15 @@ class V1Session(
     private var gearSeen = false // GEAR is authoritative once the board proves it reports it
     private var gearAddressed = false // bike board that declares GEAR: brake is addressed by gear
     private var lastCommandedGear = -1 // what we last wrote to GEAR, for the telemetry line
+
+    // What a program (MyWhoosh / TPV / QZ) or the rider last asked the machine to do, kept so it
+    // can be re-asserted after the console clears it on its own. See [reapplyControlSettings].
+    @Volatile
+    private var lastControlFields: Map<V1DataField, Float> = emptyMap()
+
+    // Set once the console proves it will not hold RUNNING with the idle lockout back on; the
+    // re-lock is then abandoned for the rest of the session. See [relockIdleModeIfAccepted].
+    private var idleLockoutRelockRefused = false
     private var lastBrakeLevel = -1 // RESISTANCE field, kept for diagnostics only
     private val gripHeartRate = GripHeartRateFilter()
 
@@ -381,6 +390,13 @@ class V1Session(
         }
 
         val fields = commandToFields(command)
+
+        // Remember what was asked for. The console clears its brake whenever it drops out of
+        // RUNNING and gets driven back, and it never says so - the last request has to be kept
+        // here, because there is nothing on the board to read it back from.
+        fields.filterKeys { it in RESTORABLE_CONTROL_FIELDS }
+            .takeIf { it.isNotEmpty() }
+            ?.let { lastControlFields = lastControlFields + it }
 
         pendingWriteMutex.withLock {
             pendingWriteFields = pendingWriteFields + fields
@@ -925,6 +941,7 @@ class V1Session(
         writeAndConfirmWorkoutMode(WorkoutMode.WARM_UP) { it != WorkoutMode.IDLE }
         val running = writeAndConfirmWorkoutMode(WorkoutMode.RUNNING) { it == WorkoutMode.RUNNING }
         logger.i(TAG, "Console state: IDLE → WARM_UP → ${running ?: WorkoutMode.UNKNOWN}")
+        if (running == WorkoutMode.RUNNING) relockIdleModeIfAccepted()
         _degradedReason.value =
             if (running == WorkoutMode.RUNNING) null
             else "The console didn't confirm the workout started — resistance/speed may not respond"
@@ -988,6 +1005,70 @@ class V1Session(
 
         logger.i(TAG, "Console left RUNNING (now $mode) - re-driving the workout transition")
         transitionToActive()
+        reapplyControlSettings()
+    }
+
+    /**
+     * Puts `IDLE_MODE_LOCKOUT` back on once the console is RUNNING.
+     *
+     * [transitionToActive] has to clear the lockout to get RUNNING at all, and until now nothing
+     * put it back - so the console ran its own idle timer for the whole ride and dropped out of
+     * RUNNING roughly every two minutes **with the rider pedalling** (measured 2026-09-05:
+     * re-drives 125 s apart, each followed within a second by the brake at gear 1). Re-locking
+     * removes that cause instead of papering over it, and takes the recovery beeping with it.
+     *
+     * Whether this firmware accepts the write *while* RUNNING had never been measured, so the
+     * write proves itself: if the console is not still RUNNING [RELOCK_SETTLE_MS] later, the
+     * lockout goes back to DISABLED and this is never attempted again this session. The failure
+     * being guarded against is a lockout that kicks the workout out of RUNNING - that would turn
+     * one drop-out every two minutes into one per poll.
+     */
+    private suspend fun relockIdleModeIfAccepted() {
+        if (!supportsIdleLockout() || idleLockoutRelockRefused) return
+        val readBack = sendReadWrite(
+            writeFields = mapOf(V1DataField.IDLE_MODE_LOCKOUT to FIELD_ENABLED),
+            readFields = setOf(V1DataField.IDLE_MODE_LOCKOUT),
+        )?.fields?.get(V1DataField.IDLE_MODE_LOCKOUT)
+        delay(RELOCK_SETTLE_MS)
+        val mode = sendReadWrite(readFields = setOf(V1DataField.WORKOUT_MODE))
+            ?.fields?.get(V1DataField.WORKOUT_MODE)?.let { WorkoutMode.fromRaw(it) }
+        if (mode == WorkoutMode.RUNNING) {
+            logger.i(TAG, "IDLE_MODE_LOCKOUT re-enabled while RUNNING (readback=$readBack), console held RUNNING")
+            return
+        }
+        idleLockoutRelockRefused = true
+        logger.w(
+            TAG,
+            "IDLE_MODE_LOCKOUT re-enable left the console in ${mode ?: WorkoutMode.UNKNOWN} - " +
+                "reverting to DISABLED and not retrying this session",
+        )
+        writeConsoleField(V1DataField.IDLE_MODE_LOCKOUT, FIELD_DISABLED)
+    }
+
+    /**
+     * Re-asserts the last requested control settings after the console has been driven back to
+     * RUNNING.
+     *
+     * The IDLE -> WARM_UP -> RUNNING transition clears the brake on this console, and the clear is
+     * invisible from the app side: the telemetry line keeps printing the last *commanded* gear, so
+     * the rider is the first to find out, mid-interval, and each console +/- press then steps up
+     * from 1 instead of from where the ride was. Replaying the exact field map last written keeps
+     * the brake where MyWhoosh / TPV / QZ / the keypad put it - nothing else moves it, because
+     * nothing else writes these fields.
+     *
+     * Queued through [pendingWriteFields] rather than written here: that is the write path the
+     * board is proven to accept, GEAR included (8-byte frame, gear in byte 4).
+     */
+    private suspend fun reapplyControlSettings() {
+        val restore = lastControlFields
+        if (restore.isEmpty()) return
+        logger.i(
+            TAG,
+            "Re-applying the settings the re-drive cleared: " +
+                restore.entries.joinToString { "${it.key.name}=${it.value}" } +
+                " (console reported resistance=${accumulator.snapshot().resistance})",
+        )
+        pendingWriteMutex.withLock { pendingWriteFields = pendingWriteFields + restore }
     }
 
     private fun supportsIdleLockout(): Boolean =
@@ -1503,6 +1584,25 @@ class V1Session(
         // it; each attempt that does not get the console back to RUNNING doubles the wait, so a
         // console that is refusing (safety key out, firmware fault) is retried once a minute
         // instead of ten times a second. Reset as soon as RUNNING is read back.
+        /**
+         * The settings a program or the rider asks for and expects to stay put: the brake (by
+         * GEAR on a gear-addressed board, by RESISTANCE otherwise), the incline and speed targets
+         * and the ERG watt target. Deliberately not FAN_STATE or VOLUME - those survive a
+         * workout-mode change on this console, and re-asserting them would fight the bezel keys.
+         */
+        private val RESTORABLE_CONTROL_FIELDS = setOf(
+            V1DataField.GEAR,
+            V1DataField.RESISTANCE,
+            V1DataField.GRADE,
+            V1DataField.KPH,
+            V1DataField.WATT_GOAL,
+            V1DataField.IS_CONSTANT_WATTS_MODE,
+        )
+
+        // How long the console gets to react to the idle lockout going back on before we decide
+        // it refused it. Two poll periods; the mode changes it makes are immediate.
+        private const val RELOCK_SETTLE_MS = 500L
+
         private const val WORKOUT_WATCHDOG_MIN_BACKOFF_MS = 5_000L
         private const val WORKOUT_WATCHDOG_MAX_BACKOFF_MS = 60_000L
 
