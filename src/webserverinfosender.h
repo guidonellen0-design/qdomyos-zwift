@@ -31,8 +31,6 @@ class WebServerInfoSender : public TemplateInfoSender {
     QStringList folders;
     bool listen();
     void processFetcher(QWebSocket *sender, const QByteArray &data);
-    void registerWebSocket(QWebSocket *pSocket);
-    void closeAllSockets();
     QTimer watchdogTimer;
 
   protected:

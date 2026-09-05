@@ -699,10 +699,6 @@
       }, 5000, 3);
       el.enqueue().then(onSettingsOK).catch(function (err) {
         console.error('Error is ' + err);
-        // The settings request is the page's first word to the server. If it times out and
-        // nothing at all has come back on this socket, the server is not talking to us: the
-        // socket is open but forgotten, and waiting will not fix it.
-        main_ws_reconnect_if_silent('the settings request went unanswered');
       })
       keys_arr = ['speed', 'speed_lapavg', 'cadence', 'cadence_lapavg', 'heart', 'heart_lapavg', 'calories', 'distance', 'watts', 'watts_lapavg',
         'elapsed_h', 'elapsed_m', 'elapsed_s', 'resistance', 'resistance_lapavg', 'peloton_resistance', 'peloton_resistance_lapavg',
