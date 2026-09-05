@@ -148,10 +148,21 @@ class V1Session(
      *
      * [appRequestedPause] keeps the watchdog from fighting a pause the app asked for: only a
      * console-initiated drop-out is recovered.
+     *
+     * [lastPedallingMs] keeps it from fighting an empty bike. The console idles out on its own
+     * whether or not anybody is riding, and re-driving RUNNING is two console writes that the
+     * S22i answers with beeps. With nobody pedalling there is no ride whose speed field needs
+     * keeping alive, so the recovery is pure noise - and it repeats at the console's own idle-out
+     * period for as long as QZ stays connected. Measured on the S22i 2026-09-05: re-drives 125 s
+     * apart with the bike untouched, beeping each time, through the night. The watchdog therefore
+     * only acts while the pedals are turning, which is exactly the case it exists for.
      */
     private var appRequestedPause = false
     private var workoutWatchdogBackoffMs = WORKOUT_WATCHDOG_MIN_BACKOFF_MS
     private var workoutWatchdogNextAttemptMs = 0L
+
+    /** When the pedals last turned, from the poll snapshot. 0 = not since this session started. */
+    private var lastPedallingMs = 0L
 
     override suspend fun start() {
         if (_sessionState.value is SessionState.Streaming || _sessionState.value is SessionState.Connecting) return
@@ -940,6 +951,9 @@ class V1Session(
      * extra bus traffic: WORKOUT_MODE is already in [V1DataField.periodicReadFields], so this
      * reads the mode the current poll just decoded.
      *
+     * Only recovered while the pedals are turning (see [lastPedallingMs]) - an idle console with
+     * an empty bike is left alone, because the recovery beeps and there is nothing to recover for.
+     *
      * Only IDLE and PAUSE are recovered - those are what the console's own timeouts produce.
      * COOL_DOWN is a deliberate end-of-workout state and DMK means the safety key is out;
      * forcing RUNNING out of either would fight the machine. Belt machines are excluded
@@ -948,15 +962,23 @@ class V1Session(
      */
     private suspend fun restoreWorkoutStateIfNeeded() {
         if (detectedDeviceType.isBeltBased || appRequestedPause) return
-        val mode = accumulator.snapshot().workoutMode?.let { WorkoutMode.fromRaw(it) } ?: return
+        val snapshot = accumulator.snapshot()
+        val now = System.currentTimeMillis()
+        // RPM is reported in every workout mode, IDLE included, so cadence stays a valid
+        // rider-present signal precisely when the mode says the console has given up.
+        if ((snapshot.cadence ?: 0) > 0) lastPedallingMs = now
+        val mode = snapshot.workoutMode?.let { WorkoutMode.fromRaw(it) } ?: return
         if (mode == WorkoutMode.RUNNING) {
             workoutWatchdogBackoffMs = WORKOUT_WATCHDOG_MIN_BACKOFF_MS
             workoutWatchdogNextAttemptMs = 0L
             return
         }
         if (mode != WorkoutMode.IDLE && mode != WorkoutMode.PAUSE) return
+        // Nobody on the bike: leave the console where it put itself. The window sits well inside
+        // the console's own ~2 min idle-out, so a rest stop mid-ride expires it and only resuming
+        // the pedals re-arms the recovery - one re-drive where it is wanted, none where it is not.
+        if (now - lastPedallingMs > WORKOUT_WATCHDOG_RIDER_WINDOW_MS) return
 
-        val now = System.currentTimeMillis()
         if (now < workoutWatchdogNextAttemptMs) return
         // Claim the next slot before trying, not after: a console that refuses to come back must
         // cost one attempt a minute, not one per poll tick for the rest of the ride.
@@ -1483,6 +1505,9 @@ class V1Session(
         // instead of ten times a second. Reset as soon as RUNNING is read back.
         private const val WORKOUT_WATCHDOG_MIN_BACKOFF_MS = 5_000L
         private const val WORKOUT_WATCHDOG_MAX_BACKOFF_MS = 60_000L
+
+        /** How long after the last pedal stroke the workout-state watchdog stays armed. */
+        private const val WORKOUT_WATCHDOG_RIDER_WINDOW_MS = 60_000L
 
         // Teardown: bound how long stop() waits for the poll loop to exit before touching the transport.
         private const val POLL_JOIN_TIMEOUT_MS = 500L
