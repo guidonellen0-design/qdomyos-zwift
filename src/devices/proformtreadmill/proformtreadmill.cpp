@@ -160,6 +160,19 @@ void proformtreadmill::claimControl() {
     uint8_t noOpData7[] = {0xfe, 0x02, 0x0d, 0x02};
     uint8_t write[] = {0xff, 0x0d, 0x02, 0x04, 0x02, 0x09, 0x04, 0x09, 0x02, 0x02, 0x00, 0x10, 0x02, 0x00, 0x00};
 
+    // iFIT repeats this 0d-class workout frame 1.5 s before its first claim,
+    // having already sent it twice during init (t=4.53, 5.29 and 29.85 in
+    // docs/captures/ifit-att-trace-2026-09-04.txt). btinit() sends it too; this
+    // is the one immediately before the claim, and only a first claim gets it --
+    // iFIT's 0x0d re-claim at t=71.62 had no preamble at all.
+    if (!controlClaimed) {
+        uint8_t noOpData11[] = {0xfe, 0x02, 0x11, 0x02};
+        uint8_t workout[] = {0xff, 0x11, 0x02, 0x04, 0x02, 0x0d, 0x04, 0x0d, 0x02, 0x05,
+                             0x00, 0x00, 0x00, 0x00, 0x08, 0x58, 0x02, 0x00, 0x7a};
+        writeCharacteristic(noOpData11, sizeof(noOpData11), QStringLiteral("claimControl"));
+        writeCharacteristic(workout, sizeof(workout), QStringLiteral("claimControl"), false, true);
+    }
+
     // byte 12 is a state, not a nonce: 0x02 claims from a standstill, 0x0d
     // re-claims after the machine has stopped itself. iFIT sends both, and the
     // second only while it still believes it holds the claim.
@@ -5508,6 +5521,39 @@ void proformtreadmill::btinit() {
 
         uint8_t initData25[] = {0xff, 0x07, 0x00, 0x00, 0x00, 0x10, 0x00, 0x08, 0x6e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
         writeCharacteristic(initData25, sizeof(initData25), QStringLiteral("init"), false, false);
+        QThread::msleep(sleepms);
+
+        /* The three configuration messages iFIT sends at t=4.5-7.0 s and this
+         * profile's init did not. Without them the machine acknowledges the
+         * 09 02 claim and still refuses to move the belt (measured on I_TL
+         * 2026-09-04). The 0c/0d classes carry the workout parameters; the
+         * proform_carbon_tlx branch below sends its own variants of the same
+         * two frames (tlx_init_033 and tlx_init_038) and only then claims
+         * control from inside btinit. Bytes are transcribed verbatim from the
+         * capture of this machine -- docs/captures/ifit-att-trace-2026-09-04.txt,
+         * t=4.53, 6.15 and 6.74 -- checksums included, so nothing is computed. */
+        uint8_t initData26[] = {0xfe, 0x02, 0x11, 0x02};
+        writeCharacteristic(initData26, sizeof(initData26), QStringLiteral("init"), false, false);
+        QThread::msleep(sleepms);
+
+        uint8_t initData27[] = {0xff, 0x11, 0x02, 0x04, 0x02, 0x0d, 0x04, 0x0d, 0x02, 0x05, 0x00, 0x00, 0x00, 0x00, 0x08, 0x58, 0x02, 0x00, 0x7a};
+        writeCharacteristic(initData27, sizeof(initData27), QStringLiteral("init"), false, false);
+        QThread::msleep(sleepms);
+
+        uint8_t initData28[] = {0xfe, 0x02, 0x10, 0x02};
+        writeCharacteristic(initData28, sizeof(initData28), QStringLiteral("init"), false, false);
+        QThread::msleep(sleepms);
+
+        uint8_t initData29[] = {0xff, 0x10, 0x02, 0x04, 0x02, 0x0c, 0x04, 0x0c, 0x02, 0x04, 0x00, 0x00, 0x00, 0x02, 0xd4, 0x1e, 0x00, 0x0a};
+        writeCharacteristic(initData29, sizeof(initData29), QStringLiteral("init"), false, false);
+        QThread::msleep(sleepms);
+
+        uint8_t initData30[] = {0xfe, 0x02, 0x10, 0x02};
+        writeCharacteristic(initData30, sizeof(initData30), QStringLiteral("init"), false, false);
+        QThread::msleep(sleepms);
+
+        uint8_t initData31[] = {0xff, 0x10, 0x02, 0x04, 0x02, 0x0c, 0x04, 0x0c, 0x02, 0x05, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x27};
+        writeCharacteristic(initData31, sizeof(initData31), QStringLiteral("init"), false, false);
         QThread::msleep(sleepms);
 
     } else if (proform_595i_proshox2) {
